@@ -1,0 +1,1451 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+namespace MobListEditor
+{
+    internal static class Program
+    {
+        [STAThread]
+        private static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+    }
+
+    internal sealed class TacticEntry { public string Section; public bool IsSection; public int MobID; public string MonsterName; public string Behavior; public string Skill; public int SkillLevel; }
+    internal sealed class HomunculusSkillDefinition { public string Family; public string SkillKey; public string DisplayName; public int DefaultMinSPPercent; public int DefaultLevel; public HomunculusSkillDefinition(string family, string skillKey, string displayName, int defaultMinSpPercent, int defaultLevel) { Family = family; SkillKey = skillKey; DisplayName = displayName; DefaultMinSPPercent = defaultMinSpPercent; DefaultLevel = defaultLevel; } }
+    internal sealed class HomunculusSkillState { public int MinSPPercent; public int Level; public int OwnerHPPercent; public int HomunHPPercent; }
+    internal sealed class SkillEditorRow { public NumericUpDown MinSPPercent; public ComboBox Level; }
+    internal sealed class PatrolSettings { public bool Enabled; public string Shape; public int Distance; }
+    internal sealed class RuntimeSettings { public bool DefendOwner; public bool TurretStayOnCell; public bool AntiStuckEnabled; public int AntiStuckMs; public bool FollowOwnerOnMove; public int FollowOwnerDelayMs; public int SoftResetMs; public int OwnerResumeMs; public int PostSkillWaitMs; public bool DanceAttackEnabled; public bool DanceMovingOnly; public bool DanceEveryAttack; public int DanceMoveMs; }
+    internal sealed class EditorProfileSnapshot { public string Id; public string Name; public string BehaviorMode; public string TacticsMode; public List<TacticEntry> Whitelist; public List<TacticEntry> Blacklist; public Dictionary<string, HomunculusSkillState> HomunculusSkills; public PatrolSettings Patrol; public RuntimeSettings Runtime; }
+    internal sealed class EditorProfileMeta { public string Id; public string Name; }
+    internal sealed class EditorProfileStore { public string ActiveProfileId; public string AltTAction; public string AltTProfileId; public List<EditorProfileMeta> Profiles; }
+    internal sealed class LegacyEditorProfileStore { public string ActiveProfileId; public string AltTAction; public string AltTProfileId; public List<EditorProfileSnapshot> Profiles; }
+    internal sealed class ProfileListItem { public string Id; public string Name; public ProfileListItem(string id, string name) { Id = id; Name = name; } public override string ToString() { return Name; } }
+
+    internal sealed class MainForm : Form
+    {
+        private static readonly string[] BehaviorOptions = { "Slepe Mode", "Snipe", "Avoid", "React", "Attack" };
+        private static readonly string[] TacticBehaviorOptions = { "", "Slepe Mode", "Snipe First", "Snipe", "Snipe Last", "Avoid", "Kite Attack", "Kite No Attack", "Attack First", "Attack", "Attack Last", "React First", "React", "React Last" };
+        private static readonly string[] SkillOptions = { "", "No Skill", "One Skill", "Two Skills", "Max Skills" };
+        private static readonly string[] SkillLevelOptions = { "", "1", "2", "3", "4", "5" };
+        private static readonly string[] HomunculusSkillLevelOptions = { "OFF", "Lv1", "Lv2", "Lv3", "Lv4", "Lv5" };
+        private static readonly string[] HomunculusFamilies = { "Amistr", "Filir", "Lif", "Vanilmirth" };
+        private static readonly HomunculusSkillDefinition[] HomunculusSkillDefinitions =
+        {
+            new HomunculusSkillDefinition("Amistr", "Bulwark", "Bulwark", 40, 0),
+            new HomunculusSkillDefinition("Amistr", "Casting", "Casting", 10, 0),
+            new HomunculusSkillDefinition("Filir", "Moonlight", "Moonlight", 38, 2),
+            new HomunculusSkillDefinition("Filir", "AcceleratedFlight", "Over Speed", 30, 1),
+            new HomunculusSkillDefinition("Filir", "Flitting", "Fleet Move", 35, 0),
+            new HomunculusSkillDefinition("Lif", "HealingTouch", "Healing Touch", 30, 5),
+            new HomunculusSkillDefinition("Lif", "UrgentEscape", "Urgent Escape", 40, 0),
+            new HomunculusSkillDefinition("Vanilmirth", "Caprice", "Caprice", 5, 5),
+            new HomunculusSkillDefinition("Vanilmirth", "ChaoticBlessings", "C.Blessing", 40, 0),
+        };
+
+        private readonly string _targetListsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TargetLists.lua");
+        private readonly string _profilesPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SlepeAI Settings Profiles.json");
+        private readonly string _profilesDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Profiles");
+        private readonly Dictionary<string, SkillEditorRow> _homunculusSkillRows = new Dictionary<string, SkillEditorRow>(StringComparer.OrdinalIgnoreCase);
+        private readonly JavaScriptSerializer _serializer = new JavaScriptSerializer();
+        private readonly ToolTip _toolTip = new ToolTip();
+        private EditorProfileStore _profileStore;
+        private ComboBox _behaviorComboBox;
+        private Label _behaviorDescriptionLabel;
+        private CheckBox _patrolEnabledCheckBox;
+        private ComboBox _patrolShapeComboBox;
+        private NumericUpDown _patrolDistanceNumeric;
+        private ComboBox _profileComboBox;
+        private ComboBox _altTActionComboBox;
+        private ComboBox _altTProfileComboBox;
+        private CheckBox _defendOwnerCheckBox;
+        private CheckBox _turretStayOnCellCheckBox;
+        private CheckBox _antiStuckEnabledCheckBox;
+        private NumericUpDown _antiStuckMsNumeric;
+        private CheckBox _followOwnerOnMoveCheckBox;
+        private NumericUpDown _followOwnerDelayMsNumeric;
+        private NumericUpDown _softResetMsNumeric;
+        private NumericUpDown _ownerResumeMsNumeric;
+        private NumericUpDown _postSkillWaitSecondsNumeric;
+        private CheckBox _danceAttackEnabledCheckBox;
+        private CheckBox _danceMovingOnlyCheckBox;
+        private CheckBox _danceEveryAttackCheckBox;
+        private NumericUpDown _danceMoveMsNumeric;
+        private NumericUpDown _chaoticBlessingsOwnerHpNumeric;
+        private NumericUpDown _chaoticBlessingsHomunHpNumeric;
+        private ComboBox _modeComboBox;
+        private Label _activeListLabel;
+        private Label _statusLabel;
+        private Timer _statusClearTimer;
+        private Label _offLabel;
+        private DataGridView _whitelistGrid;
+        private DataGridView _blacklistGrid;
+        private bool _suppressProfileSelectionChanged;
+        private bool _isDirty;
+        private bool _loadingUi;
+
+        public MainForm()
+        {
+            _loadingUi = true;
+            Text = "SlepeAI Settings";
+            Width = 1240;
+            Height = 820;
+            MinimumSize = new Size(1120, 720);
+            StartPosition = FormStartPosition.CenterScreen;
+            _toolTip.AutomaticDelay = 200;
+            _toolTip.InitialDelay = 200;
+            _toolTip.ReshowDelay = 100;
+            _toolTip.AutoPopDelay = 12000;
+            _toolTip.ShowAlways = true;
+            _toolTip.IsBalloon = true;
+
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(12) };
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Controls.Add(root);
+
+            var tabs = new TabControl { Dock = DockStyle.Fill };
+            root.Controls.Add(tabs, 0, 0);
+            var behaviorTab = new TabPage("Behavior");
+            var tacticsTab = new TabPage("Tactics");
+            var homunculusSkillsTab = new TabPage("Homunculus Skills");
+            tabs.TabPages.Add(behaviorTab);
+            tabs.TabPages.Add(tacticsTab);
+            tabs.TabPages.Add(homunculusSkillsTab);
+            BuildBehaviorTab(behaviorTab);
+            BuildTacticsTab(tacticsTab);
+            BuildHomunculusSkillsTab(homunculusSkillsTab);
+            HookDirtyTracking(this);
+
+            var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true };
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            root.Controls.Add(footer, 0, 1);
+            _statusLabel = new Label { AutoSize = true, Text = "Ready", Anchor = AnchorStyles.Left, Margin = new Padding(0, 10, 0, 0), ForeColor = Color.FromArgb(70, 70, 70), Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
+            footer.Controls.Add(_statusLabel, 0, 0);
+            _statusClearTimer = new Timer { Interval = 5000 };
+            _statusClearTimer.Tick += delegate { _statusClearTimer.Stop(); SetStatusMessage("Ready", Color.FromArgb(70, 70, 70), false); };
+            var saveButton = new Button { Text = "Save Lua", AutoSize = true, Margin = new Padding(8, 6, 0, 0) };
+            saveButton.Click += delegate { SaveFile(); };
+            footer.Controls.Add(saveButton, 1, 0);
+
+            UpdateBehaviorDescription();
+            UpdateTacticsModeView();
+            ApplyHomunculusSkillSettings(GetDefaultHomunculusSkillStates());
+            LoadFile();
+            LoadProfiles();
+            SetDirty(false);
+            _loadingUi = false;
+            FormClosing += MainForm_FormClosing;
+        }
+
+        private void SetStatusMessage(string text, Color color, bool autoClear)
+        {
+            _statusLabel.Text = text;
+            _statusLabel.ForeColor = color;
+            if (_statusClearTimer == null) return;
+            _statusClearTimer.Stop();
+            if (autoClear) _statusClearTimer.Start();
+        }
+
+        private void BuildBehaviorTab(TabPage tab)
+        {
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(12) };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            tab.Controls.Add(layout);
+            layout.Controls.Add(BuildProfilesGroup(), 0, 0);
+            var row = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            row.Controls.Add(new Label { Text = "Overall Behavior", AutoSize = true, Margin = new Padding(0, 6, 8, 0) });
+            _behaviorComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
+            _behaviorComboBox.Items.AddRange(BehaviorOptions);
+            _behaviorComboBox.SelectedIndex = 0;
+            _behaviorComboBox.SelectedIndexChanged += delegate { UpdateBehaviorDescription(); };
+            row.Controls.Add(_behaviorComboBox);
+            layout.Controls.Add(row, 0, 1);
+            layout.Controls.Add(new Label { Text = "This tab sets the global behavior mode. The checklist below shows extra live AI rules that already exist in Lua and apply alongside the editor settings.", AutoSize = true, ForeColor = Color.FromArgb(70, 70, 70), Margin = new Padding(0, 4, 0, 8) }, 0, 2);
+            _behaviorDescriptionLabel = new Label
+            {
+                Dock = DockStyle.Top,
+                AutoSize = false,
+                Height = 76,
+                BorderStyle = BorderStyle.FixedSingle,
+                Padding = new Padding(10),
+                Margin = new Padding(0, 0, 0, 8),
+                BackColor = Color.FromArgb(248, 249, 252),
+                TextAlign = ContentAlignment.TopLeft
+            };
+            layout.Controls.Add(_behaviorDescriptionLabel, 0, 3);
+            layout.Controls.Add(BuildPatrolGroup(), 0, 4);
+            layout.Controls.Add(BuildRuntimeGroup(), 0, 5);
+            layout.Controls.Add(BuildBehaviorFeaturesGroup(), 0, 6);
+        }
+
+        private Control BuildPatrolGroup()
+        {
+            var group = new GroupBox { Text = "Patrol", Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = new Padding(0, 4, 0, 0) };
+            var layout = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
+            group.Controls.Add(layout);
+            _patrolEnabledCheckBox = new CheckBox { Text = "Enable Patrol", AutoSize = true, Margin = new Padding(0, 6, 16, 0) };
+            layout.Controls.Add(_patrolEnabledCheckBox);
+            layout.Controls.Add(CreateHelpLabel("When enabled, patrol runs only while no valid targets are available. It patrols around your standby point, or around the anchor spot if turret mode is active."));
+            layout.Controls.Add(new Label { Text = "Pattern", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
+            _patrolShapeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
+            _patrolShapeComboBox.Items.AddRange(new object[] { "Square CW", "Square CCW", "Diamond CW", "Diamond CCW", "Circle CW", "Circle CCW" });
+            _patrolShapeComboBox.SelectedIndex = 0;
+            layout.Controls.Add(_patrolShapeComboBox);
+            layout.Controls.Add(new Label { Text = "Distance", AutoSize = true, Margin = new Padding(16, 8, 8, 0) });
+            _patrolDistanceNumeric = new NumericUpDown { Minimum = 1, Maximum = 12, Value = 4, Width = 70 };
+            layout.Controls.Add(_patrolDistanceNumeric);
+            return group;
+        }
+
+        private Control BuildProfilesGroup()
+        {
+            var group = new GroupBox { Text = "Profiles", Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = new Padding(0, 0, 0, 4) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1 };
+            group.Controls.Add(layout);
+
+            var profileRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
+            profileRow.Controls.Add(new Label { Text = "Profile", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
+            _profileComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 240 };
+            _profileComboBox.SelectedIndexChanged += delegate { HandleProfileSelectionChanged(); };
+            profileRow.Controls.Add(_profileComboBox);
+            var applyButton = new Button { Text = "Apply", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            applyButton.Click += delegate { ApplySelectedProfile(); };
+            profileRow.Controls.Add(applyButton);
+            var newButton = new Button { Text = "New", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            newButton.Click += delegate { CreateProfile(); };
+            profileRow.Controls.Add(newButton);
+            var renameButton = new Button { Text = "Rename", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            renameButton.Click += delegate { RenameProfile(); };
+            profileRow.Controls.Add(renameButton);
+            var deleteButton = new Button { Text = "Delete", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            deleteButton.Click += delegate { DeleteProfile(); };
+            profileRow.Controls.Add(deleteButton);
+            layout.Controls.Add(profileRow, 0, 0);
+
+            var altTRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = new Padding(0, 8, 0, 0) };
+            altTRow.Controls.Add(new Label { Text = "Standby Action", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
+            _altTActionComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
+            _altTActionComboBox.Items.AddRange(new object[] { "Standard Standby", "Quick Swap Profile", "Do Nothing", "Refresh" });
+            _altTActionComboBox.SelectedIndex = 0;
+            _altTActionComboBox.SelectedIndexChanged += delegate { UpdateAltTProfileState(); };
+            altTRow.Controls.Add(_altTActionComboBox);
+            altTRow.Controls.Add(new Label { Text = "Quick Swap Target", AutoSize = true, Margin = new Padding(16, 8, 8, 0) });
+            _altTProfileComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 240 };
+            altTRow.Controls.Add(_altTProfileComboBox);
+            layout.Controls.Add(altTRow, 0, 1);
+
+            layout.Controls.Add(new Label { Text = "Profile 1 starts as your current system and can be renamed. Profiles are editor-side for now; standby actions are not wired into Lua yet.", AutoSize = true, ForeColor = Color.FromArgb(70, 70, 70), Margin = new Padding(0, 8, 0, 0) }, 0, 2);
+            return group;
+        }
+
+        private Control BuildRuntimeGroup()
+        {
+            var group = new GroupBox { Text = "Timing / Testing", Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = new Padding(0, 4, 0, 0) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            group.Controls.Add(layout);
+
+            AddToggleTimingRow(layout, 0, "Anti-Stuck Reset", true, out _antiStuckEnabledCheckBox, out _antiStuckMsNumeric, 100, 5000, 500, "If enabled, the homunculus can force a reassess after staying truly idle too long.");
+            AddToggleTimingRow(layout, 1, "Abandon To Follow Owner", true, out _followOwnerOnMoveCheckBox, out _followOwnerDelayMsNumeric, 0, 5000, 0, "If enabled, the homunculus can drop what it is doing and follow you when you move. The number is the delay before that follow begins.");
+            AddTimingRow(layout, 2, "Soft Reset Reassess (ms)", out _softResetMsNumeric, 100, 5000, 400, "How long the soft reset waits before it is allowed to look for a target again.");
+            AddTimingRow(layout, 3, "Resume After Owner Stops (ms)", out _ownerResumeMsNumeric, 0, 2000, 100, "How long the homunculus keeps following you after you stop moving before it becomes aggressive again.");
+            AddSecondsTimingRow(layout, 4, "Post-Skill Wait (s)", out _postSkillWaitSecondsNumeric, 0.0m, 10.0m, 0.5m, "After casting on its current chase target, the homunculus stands still for this long before reassessing instead of falling straight into standby.");
+            AddDanceAttackRow(layout, 5);
+
+            return group;
+        }
+
+        private Control BuildBehaviorFeaturesGroup()
+        {
+            var group = new GroupBox { Text = "Live AI Features", Dock = DockStyle.Fill, Padding = new Padding(10), Margin = new Padding(0, 4, 0, 0) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            group.Controls.Add(layout);
+
+            _defendOwnerCheckBox = AddInteractiveFeatureRow(layout, 0, "Defend Owner", true, "If enabled, owner defense bypasses whitelist and blacklist and takes priority when mobs are on you.");
+            AddFeatureRow(layout, 1, "Turret Mode", "MOVE command anchors the homunculus to the clicked spot and makes it fight around that area instead of following normally.");
+            _turretStayOnCellCheckBox = AddInteractiveFeatureRow(layout, 2, "Stay On Cell", false, "When turret mode is active, the homunculus stays on the anchored cell and only attacks or casts when the target is already in range.");
+            AddFeatureRow(layout, 3, "No KS", "It avoids mobs already being handled by other players or homunculi, and also avoids mobs already chasing someone else.");
+            return group;
+        }
+
+        private void AddFeatureRow(TableLayoutPanel layout, int rowIndex, string title, string description)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var box = new CheckBox { Checked = true, AutoCheck = false, AutoSize = true, Margin = new Padding(0, 2, 6, 10), Anchor = AnchorStyles.Top | AnchorStyles.Left, Text = title };
+            var help = CreateHelpLabel(description);
+            help.Margin = new Padding(0, 2, 0, 10);
+            layout.Controls.Add(box, 0, rowIndex);
+            layout.Controls.Add(help, 1, rowIndex);
+        }
+
+        private CheckBox AddInteractiveFeatureRow(TableLayoutPanel layout, int rowIndex, string title, bool isChecked, string description)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var box = new CheckBox { Checked = isChecked, AutoSize = true, Margin = new Padding(0, 2, 6, 10), Anchor = AnchorStyles.Top | AnchorStyles.Left, Text = title };
+            var help = CreateHelpLabel(description);
+            help.Margin = new Padding(0, 2, 0, 10);
+            layout.Controls.Add(box, 0, rowIndex);
+            layout.Controls.Add(help, 1, rowIndex);
+            return box;
+        }
+
+        private Label CreateHelpLabel(string description)
+        {
+            var help = new Label
+            {
+                AutoSize = true,
+                Text = "?",
+                Cursor = Cursors.Help,
+                ForeColor = Color.FromArgb(35, 90, 170),
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                Margin = new Padding(0, 4, 8, 0)
+            };
+            _toolTip.SetToolTip(help, description);
+            help.MouseHover += (sender, args) => _toolTip.Show(description, help, help.Width / 2, help.Height + 4, 12000);
+            help.MouseLeave += (sender, args) => _toolTip.Hide(help);
+            help.Click += (sender, args) => MessageBox.Show(this, description, "Help", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return help;
+        }
+
+        private void AddTimingRow(TableLayoutPanel layout, int rowIndex, string label, out NumericUpDown numeric, int min, int max, int value, string description)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var title = new Label { Text = label, AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
+            numeric = new NumericUpDown { Minimum = min, Maximum = max, Value = value, Width = 90, Margin = new Padding(0, 4, 10, 0) };
+            var help = CreateHelpLabel(description);
+            help.Margin = new Padding(0, 6, 0, 0);
+            layout.Controls.Add(title, 0, rowIndex);
+            layout.Controls.Add(numeric, 1, rowIndex);
+            layout.Controls.Add(help, 2, rowIndex);
+        }
+
+        private void AddSecondsTimingRow(TableLayoutPanel layout, int rowIndex, string label, out NumericUpDown numeric, decimal min, decimal max, decimal value, string description)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var title = new Label { Text = label, AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
+            numeric = new NumericUpDown { Minimum = min, Maximum = max, DecimalPlaces = 1, Increment = 0.1m, Value = value, Width = 90, Margin = new Padding(0, 4, 10, 0) };
+            var help = CreateHelpLabel(description);
+            help.Margin = new Padding(0, 6, 0, 0);
+            layout.Controls.Add(title, 0, rowIndex);
+            layout.Controls.Add(numeric, 1, rowIndex);
+            layout.Controls.Add(help, 2, rowIndex);
+        }
+
+        private void AddToggleTimingRow(TableLayoutPanel layout, int rowIndex, string label, bool isChecked, out CheckBox checkBox, out NumericUpDown numeric, int min, int max, int value, string description)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var localCheckBox = new CheckBox { Text = label, Checked = isChecked, AutoSize = true, Margin = new Padding(0, 6, 8, 0) };
+            var localNumeric = new NumericUpDown { Minimum = min, Maximum = max, Value = value, Width = 90, Margin = new Padding(0, 4, 10, 0), Enabled = isChecked };
+            localCheckBox.CheckedChanged += delegate { localNumeric.Enabled = localCheckBox.Checked; };
+            var help = CreateHelpLabel(description);
+            help.Margin = new Padding(0, 6, 0, 0);
+            layout.Controls.Add(localCheckBox, 0, rowIndex);
+            layout.Controls.Add(localNumeric, 1, rowIndex);
+            layout.Controls.Add(help, 2, rowIndex);
+            checkBox = localCheckBox;
+            numeric = localNumeric;
+        }
+
+        private void AddDanceAttackRow(TableLayoutPanel layout, int rowIndex)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            _danceAttackEnabledCheckBox = new CheckBox { Text = "Dance Attack", Checked = false, AutoSize = true, Margin = new Padding(0, 4, 8, 0) };
+            _danceMovingOnlyCheckBox = new CheckBox { Text = "Moving Targets Only", Checked = true, AutoSize = true, Margin = new Padding(24, 2, 8, 0) };
+            _danceEveryAttackCheckBox = new CheckBox { Text = "Every Attack", Checked = false, AutoSize = true, Margin = new Padding(24, 2, 8, 0) };
+            _danceMoveMsNumeric = new NumericUpDown { Minimum = 100, Maximum = 3000, Value = 600, Width = 90, Margin = new Padding(0, 2, 8, 0) };
+            var help = CreateHelpLabel("Dance attack settings. The main checkbox enables dance attack behavior. Moving Targets Only limits it to moving enemies. Every Attack ignores the delay setting and tries to dance on each attack cycle.");
+            help.Margin = new Padding(6, 4, 0, 0);
+
+            _danceAttackEnabledCheckBox.CheckedChanged += delegate { UpdateDanceAttackControls(); };
+            _danceEveryAttackCheckBox.CheckedChanged += delegate { UpdateDanceAttackControls(); };
+
+            var outer = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Margin = new Padding(0) };
+            outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            var topRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            topRow.Controls.Add(_danceAttackEnabledCheckBox);
+            topRow.Controls.Add(new Label { Text = "Delay (ms)", AutoSize = true, Margin = new Padding(10, 6, 8, 0) });
+            topRow.Controls.Add(_danceMoveMsNumeric);
+            topRow.Controls.Add(help);
+
+            var subRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            subRow.Controls.Add(_danceMovingOnlyCheckBox);
+
+            var subRow2 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            subRow2.Controls.Add(_danceEveryAttackCheckBox);
+
+            outer.Controls.Add(topRow, 0, 0);
+            outer.Controls.Add(subRow, 0, 1);
+            outer.Controls.Add(subRow2, 0, 2);
+
+            layout.Controls.Add(outer, 0, rowIndex);
+            layout.SetColumnSpan(outer, 3);
+
+            UpdateDanceAttackControls();
+        }
+
+        private void UpdateDanceAttackControls()
+        {
+            if (_danceAttackEnabledCheckBox == null || _danceMovingOnlyCheckBox == null || _danceEveryAttackCheckBox == null || _danceMoveMsNumeric == null) return;
+            var enabled = _danceAttackEnabledCheckBox.Checked;
+            _danceMovingOnlyCheckBox.Enabled = enabled;
+            _danceEveryAttackCheckBox.Enabled = enabled;
+            _danceMoveMsNumeric.Enabled = enabled && _danceEveryAttackCheckBox.Checked == false;
+        }
+
+        private void BuildTacticsTab(TabPage tab)
+        {
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(12) };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            tab.Controls.Add(root);
+            var options = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Margin = new Padding(0, 0, 0, 12) };
+            root.Controls.Add(options, 0, 0);
+            options.Controls.Add(new Label { Text = "Mode", AutoSize = true, Margin = new Padding(0, 6, 8, 0) });
+            _modeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
+            _modeComboBox.Items.AddRange(new object[] { "Off", "Whitelist", "Blacklist" });
+            _modeComboBox.SelectedIndex = 0;
+            _modeComboBox.SelectedIndexChanged += delegate { UpdateTacticsModeView(); };
+            options.Controls.Add(_modeComboBox);
+            var upButton = new Button { Text = "Move Up", AutoSize = true, Margin = new Padding(12, 2, 0, 0) };
+            upButton.Click += delegate { MoveSelectedRow(-1); };
+            options.Controls.Add(upButton);
+            var downButton = new Button { Text = "Move Down", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            downButton.Click += delegate { MoveSelectedRow(1); };
+            options.Controls.Add(downButton);
+            var deleteButton = new Button { Text = "Delete Row", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            deleteButton.Click += delegate { DeleteSelectedRow(); };
+            options.Controls.Add(deleteButton);
+            var sectionButton = new Button { Text = "Add Section", AutoSize = true, Margin = new Padding(8, 2, 0, 0) };
+            sectionButton.Click += delegate { AddSectionRow(); };
+            options.Controls.Add(sectionButton);
+
+            var editorLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            editorLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            editorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            root.Controls.Add(editorLayout, 0, 1);
+            _activeListLabel = new Label { Text = "Whitelist Tactics", AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
+            editorLayout.Controls.Add(_activeListLabel, 0, 0);
+            var panel = new Panel { Dock = DockStyle.Fill };
+            editorLayout.Controls.Add(panel, 0, 1);
+            _whitelistGrid = CreateGrid();
+            _blacklistGrid = CreateGrid();
+            _offLabel = new Label { Text = "Tactics is off", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI", 14f, FontStyle.Bold), Visible = false };
+            panel.Controls.Add(_whitelistGrid);
+            panel.Controls.Add(_blacklistGrid);
+            panel.Controls.Add(_offLabel);
+        }
+
+        private void BuildHomunculusSkillsTab(TabPage tab)
+        {
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(12) };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            tab.Controls.Add(root);
+            root.Controls.Add(new Label { Text = "These defaults are lower priority than per-monster tactics. Vanilmirth settings are active right now; the other homunculus families are saved for future behavior work.", AutoSize = true, ForeColor = Color.FromArgb(70, 70, 70), Margin = new Padding(0, 0, 0, 12) }, 0, 0);
+            var scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+            root.Controls.Add(scrollPanel, 0, 1);
+            var stack = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1 };
+            scrollPanel.Controls.Add(stack);
+            foreach (var family in HomunculusFamilies) stack.Controls.Add(BuildHomunculusFamilyGroup(family));
+        }
+
+        private Control BuildHomunculusFamilyGroup(string family)
+        {
+            var group = new GroupBox { Text = family, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0, 0, 0, 12), Padding = new Padding(12) };
+            var skills = HomunculusSkillDefinitions.Where(d => string.Equals(d.Family, family, StringComparison.OrdinalIgnoreCase)).ToArray();
+            var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3 };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            group.Controls.Add(layout);
+            layout.Controls.Add(new Label { Text = "Skill", AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Margin = new Padding(0, 0, 12, 8) }, 0, 0);
+            layout.Controls.Add(new Label { Text = "Stop Using Below % SP", AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Margin = new Padding(0, 0, 12, 8) }, 1, 0);
+            layout.Controls.Add(new Label { Text = "Default Level", AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8) }, 2, 0);
+            var row = 1;
+            for (var i = 0; i < skills.Length; i++)
+            {
+                var def = skills[i];
+                layout.Controls.Add(new Label { Text = def.DisplayName, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 12, 6) }, 0, row);
+                var minSp = new NumericUpDown { Minimum = 0, Maximum = 100, Value = def.DefaultMinSPPercent, Width = 90, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 12, 2) };
+                layout.Controls.Add(minSp, 1, row);
+                var level = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 0, 2) };
+                level.Items.AddRange(HomunculusSkillLevelOptions);
+                level.SelectedItem = LevelToDisplay(def.DefaultLevel);
+                layout.Controls.Add(level, 2, row);
+                _homunculusSkillRows[BuildSkillStateKey(def.Family, def.SkillKey)] = new SkillEditorRow { MinSPPercent = minSp, Level = level };
+                row++;
+
+                if (string.Equals(def.Family, "Vanilmirth", StringComparison.OrdinalIgnoreCase) && string.Equals(def.SkillKey, "ChaoticBlessings", StringComparison.OrdinalIgnoreCase))
+                {
+                    layout.Controls.Add(new Label { Text = "    Cast When Owner HP % Is At Or Below", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 12, 4) }, 0, row);
+                    _chaoticBlessingsOwnerHpNumeric = new NumericUpDown { Minimum = 0, Maximum = 100, Value = 0, Width = 90, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 12, 2) };
+                    layout.Controls.Add(_chaoticBlessingsOwnerHpNumeric, 1, row);
+                    layout.Controls.Add(new Label { Text = "0 = OFF", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 0, 0), ForeColor = Color.FromArgb(110, 110, 110) }, 2, row);
+                    row++;
+
+                    layout.Controls.Add(new Label { Text = "    Cast When Homu HP % Is At Or Below", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 12, 6) }, 0, row);
+                    _chaoticBlessingsHomunHpNumeric = new NumericUpDown { Minimum = 0, Maximum = 100, Value = 0, Width = 90, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 12, 2) };
+                    layout.Controls.Add(_chaoticBlessingsHomunHpNumeric, 1, row);
+                    layout.Controls.Add(new Label { Text = "0 = OFF", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 0, 0), ForeColor = Color.FromArgb(110, 110, 110) }, 2, row);
+                    row++;
+                }
+            }
+            return group;
+        }
+
+        private DataGridView CreateGrid()
+        {
+            var grid = new DataGridView { Dock = DockStyle.Fill, AllowUserToAddRows = true, AllowUserToDeleteRows = false, AllowUserToResizeRows = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window, BorderStyle = BorderStyle.FixedSingle, EditMode = DataGridViewEditMode.EditOnEnter, MultiSelect = false, RowHeadersVisible = true, SelectionMode = DataGridViewSelectionMode.CellSelect };
+            grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Section", Visible = false });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "MobID", HeaderText = "Mob ID", FillWeight = 12f });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "MonsterName", HeaderText = "Monster Name", FillWeight = 24f });
+            var behavior = new DataGridViewComboBoxColumn { Name = "Behavior", HeaderText = "Behavior", FillWeight = 20f, FlatStyle = FlatStyle.Flat };
+            behavior.Items.AddRange(TacticBehaviorOptions);
+            grid.Columns.Add(behavior);
+            var skill = new DataGridViewComboBoxColumn { Name = "Skill", HeaderText = "Skill", FillWeight = 18f, FlatStyle = FlatStyle.Flat };
+            skill.Items.AddRange(SkillOptions);
+            grid.Columns.Add(skill);
+            var skillLevel = new DataGridViewComboBoxColumn { Name = "SkillLevel", HeaderText = "Skill Level", FillWeight = 12f, FlatStyle = FlatStyle.Flat };
+            skillLevel.Items.AddRange(SkillLevelOptions);
+            grid.Columns.Add(skillLevel);
+            grid.CellClick += GridStartEdit;
+            grid.CellEnter += GridStartEdit;
+            grid.CurrentCellDirtyStateChanged += delegate(object sender, EventArgs e) { var current = (DataGridView)sender; if (current.IsCurrentCellDirty) current.CommitEdit(DataGridViewDataErrorContexts.Commit); };
+            grid.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) { DeleteSelectedRow((DataGridView)sender); e.Handled = true; } };
+            grid.CellValueChanged += delegate(object sender, DataGridViewCellEventArgs e) { RefreshRowStyles((DataGridView)sender); MarkDirty(); };
+            grid.RowsAdded += delegate(object sender, DataGridViewRowsAddedEventArgs e) { RefreshRowStyles((DataGridView)sender); MarkDirty(); };
+            grid.RowsRemoved += delegate(object sender, DataGridViewRowsRemovedEventArgs e) { RefreshRowStyles((DataGridView)sender); MarkDirty(); };
+            return grid;
+        }
+
+        private void GridStartEdit(object sender, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0 && e.ColumnIndex >= 0) ((DataGridView)sender).BeginEdit(true); }
+
+        private void HookDirtyTracking(Control parent)
+        {
+            foreach (Control control in parent.Controls)
+            {
+                if (!ReferenceEquals(control, _profileComboBox))
+                {
+                    var checkBox = control as CheckBox;
+                    var numeric = control as NumericUpDown;
+                    var comboBox = control as ComboBox;
+                    var textBox = control as TextBox;
+
+                    if (checkBox != null)
+                    {
+                        checkBox.CheckedChanged += delegate { MarkDirty(); };
+                    }
+                    else if (numeric != null)
+                    {
+                        numeric.ValueChanged += delegate { MarkDirty(); };
+                    }
+                    else if (comboBox != null)
+                    {
+                        comboBox.SelectedIndexChanged += delegate { MarkDirty(); };
+                    }
+                    else if (textBox != null)
+                    {
+                        textBox.TextChanged += delegate { MarkDirty(); };
+                    }
+                }
+
+                if (control.HasChildren)
+                {
+                    HookDirtyTracking(control);
+                }
+            }
+        }
+
+        private void SetDirty(bool dirty)
+        {
+            _isDirty = dirty;
+        }
+
+        private void MarkDirty()
+        {
+            if (_loadingUi || _suppressProfileSelectionChanged) return;
+            _isDirty = true;
+        }
+
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (_isDirty == false) return;
+
+            var result = MessageBox.Show(this, "Overwrite Settings?", "Overwrite Settings?", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+            if (result == DialogResult.Cancel)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            if (result == DialogResult.Yes && SaveFile() == false)
+            {
+                e.Cancel = true;
+            }
+        }
+
+        private void LoadFile()
+        {
+            try
+            {
+                if (!File.Exists(_targetListsPath)) { SetStatusMessage("File not found yet. Set your behavior and save to create it.", Color.FromArgb(70, 70, 70), false); return; }
+                var text = File.ReadAllText(_targetListsPath);
+                _behaviorComboBox.SelectedItem = ParseBehaviorMode(text);
+                _modeComboBox.SelectedItem = ParseTacticsMode(text);
+                PopulateGrid(_whitelistGrid, ParseEntries(text, "Whitelist"));
+                PopulateGrid(_blacklistGrid, ParseEntries(text, "Blacklist"));
+                ApplyHomunculusSkillSettings(ParseHomunculusSkillSettings(text));
+                ApplyPatrolSettings(ParsePatrolSettings(text));
+                ApplyRuntimeSettings(ParseRuntimeSettings(text));
+                UpdateBehaviorDescription();
+                UpdateTacticsModeView();
+                SetStatusMessage("Loaded " + Path.GetFileName(_targetListsPath), Color.FromArgb(70, 70, 70), true);
+                SetDirty(false);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Load failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                SetStatusMessage("Load failed", Color.FromArgb(180, 45, 45), true);
+            }
+        }
+
+        private bool SaveFile()
+        {
+            try
+            {
+                SaveCurrentEditorIntoActiveProfile();
+                SaveProfiles();
+                WriteTargetLists();
+                SetStatusMessage("Saved " + Path.GetFileName(_targetListsPath), Color.FromArgb(28, 140, 64), true);
+                SetDirty(false);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                SetStatusMessage("Save failed", Color.FromArgb(180, 45, 45), true);
+                return false;
+            }
+        }
+
+        private void WriteTargetLists()
+        {
+            var text = BuildLua(GetBehaviorMode(), GetSelectedTacticsMode(), ReadEntries(_whitelistGrid), ReadEntries(_blacklistGrid), ReadHomunculusSkillSettings(), ReadPatrolSettings(), ReadRuntimeSettings());
+            File.WriteAllText(_targetListsPath, text, new UTF8Encoding(false));
+        }
+
+        private void LoadProfiles()
+        {
+            _profileStore = ReadProfileStore();
+            if (_profileStore.Profiles == null || _profileStore.Profiles.Count == 0)
+            {
+                var initial = CaptureCurrentSnapshot("Profile 1", Guid.NewGuid().ToString("N"));
+                _profileStore.Profiles = new List<EditorProfileMeta> { new EditorProfileMeta { Id = initial.Id, Name = initial.Name } };
+                WriteProfileSnapshot(initial);
+                _profileStore.ActiveProfileId = initial.Id;
+                _profileStore.AltTAction = "Standard Standby";
+                _profileStore.AltTProfileId = initial.Id;
+                SaveProfiles();
+            }
+
+            PopulateProfileSelectors();
+            var active = GetActiveProfile();
+            if (active != null) ApplySnapshot(active);
+            UpdateAltTProfileState();
+            SetDirty(false);
+        }
+
+        private EditorProfileStore ReadProfileStore()
+        {
+            try
+            {
+                if (File.Exists(_profilesPath))
+                {
+                    Directory.CreateDirectory(_profilesDirectory);
+                    var raw = File.ReadAllText(_profilesPath, Encoding.UTF8);
+                    var loaded = _serializer.Deserialize<EditorProfileStore>(raw);
+                    if (loaded != null)
+                    {
+                        if (loaded.Profiles == null) loaded.Profiles = new List<EditorProfileMeta>();
+                        if (string.IsNullOrWhiteSpace(loaded.AltTAction)) loaded.AltTAction = "Standard Standby";
+
+                        var legacy = _serializer.Deserialize<LegacyEditorProfileStore>(raw);
+                        if (legacy != null && legacy.Profiles != null)
+                        {
+                            foreach (var snapshot in legacy.Profiles)
+                            {
+                                if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.Id)) continue;
+                                if (!File.Exists(GetProfilePath(snapshot.Id)))
+                                {
+                                    WriteProfileSnapshot(NormalizeSnapshot(snapshot, snapshot.Name, snapshot.Id));
+                                }
+
+                                if (!loaded.Profiles.Any(p => string.Equals(p.Id, snapshot.Id, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    loaded.Profiles.Add(new EditorProfileMeta { Id = snapshot.Id, Name = string.IsNullOrWhiteSpace(snapshot.Name) ? "Profile" : snapshot.Name });
+                                }
+                            }
+                        }
+
+                        return loaded;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return new EditorProfileStore { Profiles = new List<EditorProfileMeta>(), AltTAction = "Standard Standby" };
+        }
+
+        private void SaveProfiles()
+        {
+            if (_profileStore == null) return;
+            Directory.CreateDirectory(_profilesDirectory);
+            File.WriteAllText(_profilesPath, _serializer.Serialize(_profileStore), new UTF8Encoding(false));
+        }
+
+        private void PopulateProfileSelectors()
+        {
+            _suppressProfileSelectionChanged = true;
+            _profileComboBox.Items.Clear();
+            _altTProfileComboBox.Items.Clear();
+            foreach (var profile in _profileStore.Profiles)
+            {
+                _profileComboBox.Items.Add(new ProfileListItem(profile.Id, profile.Name));
+                _altTProfileComboBox.Items.Add(new ProfileListItem(profile.Id, profile.Name));
+            }
+
+            SelectProfileItem(_profileComboBox, _profileStore.ActiveProfileId);
+            SelectProfileItem(_altTProfileComboBox, _profileStore.AltTProfileId ?? _profileStore.ActiveProfileId);
+            var savedAction = Convert.ToString(_profileStore.AltTAction) ?? "Standard Standby";
+            if (string.Equals(savedAction, "Quick Swap Profile", StringComparison.OrdinalIgnoreCase))
+                _altTActionComboBox.SelectedItem = "Quick Swap Profile";
+            else if (string.Equals(savedAction, "Do Nothing", StringComparison.OrdinalIgnoreCase))
+                _altTActionComboBox.SelectedItem = "Do Nothing";
+            else if (string.Equals(savedAction, "Refresh", StringComparison.OrdinalIgnoreCase))
+                _altTActionComboBox.SelectedItem = "Refresh";
+            else
+                _altTActionComboBox.SelectedItem = "Standard Standby";
+            _suppressProfileSelectionChanged = false;
+        }
+
+        private void SelectProfileItem(ComboBox comboBox, string profileId)
+        {
+            for (var i = 0; i < comboBox.Items.Count; i++)
+            {
+                var item = comboBox.Items[i] as ProfileListItem;
+                if (item != null && string.Equals(item.Id, profileId, StringComparison.OrdinalIgnoreCase))
+                {
+                    comboBox.SelectedIndex = i;
+                    return;
+                }
+            }
+
+            if (comboBox.Items.Count > 0) comboBox.SelectedIndex = 0;
+        }
+
+        private string GetProfilePath(string profileId)
+        {
+            return Path.Combine(_profilesDirectory, (profileId ?? string.Empty) + ".json");
+        }
+
+        private EditorProfileSnapshot NormalizeSnapshot(EditorProfileSnapshot snapshot, string fallbackName, string fallbackId)
+        {
+            var normalized = snapshot ?? new EditorProfileSnapshot();
+            normalized.Id = string.IsNullOrWhiteSpace(normalized.Id) ? fallbackId : normalized.Id;
+            normalized.Name = string.IsNullOrWhiteSpace(normalized.Name) ? (string.IsNullOrWhiteSpace(fallbackName) ? "Profile" : fallbackName) : normalized.Name;
+            normalized.BehaviorMode = NormalizeBehaviorMode(normalized.BehaviorMode);
+            normalized.TacticsMode = NormalizeTacticsMode(normalized.TacticsMode);
+            normalized.Whitelist = CloneEntries(normalized.Whitelist ?? new List<TacticEntry>());
+            normalized.Blacklist = CloneEntries(normalized.Blacklist ?? new List<TacticEntry>());
+            normalized.HomunculusSkills = CloneSkillSettings(normalized.HomunculusSkills ?? GetDefaultHomunculusSkillStates());
+            normalized.Patrol = normalized.Patrol ?? new PatrolSettings { Enabled = false, Shape = "Square CW", Distance = 4 };
+            normalized.Patrol.Shape = NormalizePatrolShape(normalized.Patrol.Shape);
+            normalized.Patrol.Distance = ClampPatrolDistance(normalized.Patrol.Distance);
+            normalized.Runtime = CloneRuntimeSettings(normalized.Runtime);
+            return normalized;
+        }
+
+        private EditorProfileSnapshot ReadProfileSnapshot(string id, string fallbackName)
+        {
+            try
+            {
+                var path = GetProfilePath(id);
+                if (File.Exists(path))
+                {
+                    var loaded = _serializer.Deserialize<EditorProfileSnapshot>(File.ReadAllText(path, Encoding.UTF8));
+                    if (loaded != null)
+                    {
+                        return NormalizeSnapshot(loaded, fallbackName, id);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return NormalizeSnapshot(new EditorProfileSnapshot { Id = id, Name = fallbackName }, fallbackName, id);
+        }
+
+        private void WriteProfileSnapshot(EditorProfileSnapshot snapshot)
+        {
+            var normalized = NormalizeSnapshot(snapshot, snapshot != null ? snapshot.Name : "Profile", snapshot != null ? snapshot.Id : Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(_profilesDirectory);
+            File.WriteAllText(GetProfilePath(normalized.Id), _serializer.Serialize(normalized), new UTF8Encoding(false));
+        }
+
+        private void DeleteProfileSnapshot(string id)
+        {
+            var path = GetProfilePath(id);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+
+        private EditorProfileMeta GetActiveProfileMeta()
+        {
+            if (_profileStore == null || _profileStore.Profiles == null) return null;
+            var active = _profileStore.Profiles.FirstOrDefault(p => string.Equals(p.Id, _profileStore.ActiveProfileId, StringComparison.OrdinalIgnoreCase));
+            return active ?? _profileStore.Profiles.FirstOrDefault();
+        }
+
+        private EditorProfileSnapshot GetActiveProfile()
+        {
+            var active = GetActiveProfileMeta();
+            return active == null ? null : ReadProfileSnapshot(active.Id, active.Name);
+        }
+
+        private EditorProfileMeta GetSelectedProfileMeta()
+        {
+            var item = _profileComboBox.SelectedItem as ProfileListItem;
+            if (item == null || _profileStore == null || _profileStore.Profiles == null) return null;
+            return _profileStore.Profiles.FirstOrDefault(p => string.Equals(p.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private EditorProfileSnapshot GetSelectedProfile()
+        {
+            var selected = GetSelectedProfileMeta();
+            return selected == null ? null : ReadProfileSnapshot(selected.Id, selected.Name);
+        }
+
+        private void SaveCurrentEditorIntoActiveProfile()
+        {
+            var active = GetActiveProfileMeta();
+            if (active == null) return;
+            var snapshot = CaptureCurrentSnapshot(active.Name, active.Id);
+            active.Name = snapshot.Name;
+            WriteProfileSnapshot(snapshot);
+            _profileStore.ActiveProfileId = active.Id;
+            _profileStore.AltTAction = Convert.ToString(_altTActionComboBox.SelectedItem) ?? "Standard Standby";
+            var altItem = _altTProfileComboBox.SelectedItem as ProfileListItem;
+            _profileStore.AltTProfileId = altItem != null ? altItem.Id : active.Id;
+        }
+
+        private EditorProfileSnapshot CaptureCurrentSnapshot(string name, string id)
+        {
+            return new EditorProfileSnapshot
+            {
+                Id = id,
+                Name = string.IsNullOrWhiteSpace(name) ? "Profile" : name,
+                BehaviorMode = GetBehaviorMode(),
+                TacticsMode = GetSelectedTacticsMode(),
+                Whitelist = CloneEntries(ReadEntries(_whitelistGrid)),
+                Blacklist = CloneEntries(ReadEntries(_blacklistGrid)),
+                HomunculusSkills = CloneSkillSettings(ReadHomunculusSkillSettings()),
+                Patrol = new PatrolSettings
+                {
+                    Enabled = _patrolEnabledCheckBox.Checked,
+                    Shape = Convert.ToString(_patrolShapeComboBox.SelectedItem) ?? "Square CW",
+                    Distance = (int)_patrolDistanceNumeric.Value
+                },
+                Runtime = CloneRuntimeSettings(ReadRuntimeSettings())
+            };
+        }
+
+        private void ApplySnapshot(EditorProfileSnapshot snapshot)
+        {
+            if (snapshot == null) return;
+            _suppressProfileSelectionChanged = true;
+            _behaviorComboBox.SelectedItem = NormalizeBehaviorMode(snapshot.BehaviorMode);
+            _modeComboBox.SelectedItem = NormalizeTacticsMode(snapshot.TacticsMode);
+            PopulateGrid(_whitelistGrid, CloneEntries(snapshot.Whitelist ?? new List<TacticEntry>()));
+            PopulateGrid(_blacklistGrid, CloneEntries(snapshot.Blacklist ?? new List<TacticEntry>()));
+            ApplyHomunculusSkillSettings(CloneSkillSettings(snapshot.HomunculusSkills ?? GetDefaultHomunculusSkillStates()));
+            _patrolEnabledCheckBox.Checked = snapshot.Patrol != null && snapshot.Patrol.Enabled;
+            _patrolShapeComboBox.SelectedItem = NormalizePatrolShape(snapshot.Patrol != null ? snapshot.Patrol.Shape : "Square");
+            _patrolDistanceNumeric.Value = ClampPatrolDistance(snapshot.Patrol != null ? snapshot.Patrol.Distance : 4);
+            ApplyRuntimeSettings(CloneRuntimeSettings(snapshot.Runtime));
+            _profileStore.ActiveProfileId = snapshot.Id;
+            SelectProfileItem(_profileComboBox, snapshot.Id);
+            UpdateBehaviorDescription();
+            UpdateTacticsModeView();
+            UpdateAltTProfileState();
+            _suppressProfileSelectionChanged = false;
+        }
+
+        private void ApplySelectedProfile()
+        {
+            var selected = GetSelectedProfile();
+            if (selected == null) return;
+            ApplySnapshot(selected);
+            SaveProfiles();
+            WriteTargetLists();
+            SetStatusMessage("Applied profile " + selected.Name + ".", Color.FromArgb(28, 140, 64), true);
+            SetDirty(false);
+        }
+
+        private void CreateProfile()
+        {
+            SaveCurrentEditorIntoActiveProfile();
+            var name = PromptForText(this, "Create Profile", "Profile name:", "Profile " + ((_profileStore.Profiles != null ? _profileStore.Profiles.Count : 0) + 1));
+            if (string.IsNullOrWhiteSpace(name)) return;
+            var snapshot = CaptureCurrentSnapshot(name.Trim(), Guid.NewGuid().ToString("N"));
+            WriteProfileSnapshot(snapshot);
+            _profileStore.Profiles.Add(new EditorProfileMeta { Id = snapshot.Id, Name = snapshot.Name });
+            _profileStore.ActiveProfileId = snapshot.Id;
+            PopulateProfileSelectors();
+            ApplySnapshot(snapshot);
+            SaveProfiles();
+            WriteTargetLists();
+            SetStatusMessage("Created profile " + snapshot.Name + ".", Color.FromArgb(28, 140, 64), true);
+            SetDirty(false);
+        }
+
+        private void RenameProfile()
+        {
+            var selectedMeta = GetSelectedProfileMeta();
+            if (selectedMeta == null) return;
+            var selected = ReadProfileSnapshot(selectedMeta.Id, selectedMeta.Name);
+            if (selected == null) return;
+            var name = PromptForText(this, "Rename Profile", "Profile name:", selected.Name);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            selected.Name = name.Trim();
+            selectedMeta.Name = selected.Name;
+            WriteProfileSnapshot(selected);
+            PopulateProfileSelectors();
+            SelectProfileItem(_profileComboBox, selected.Id);
+            SaveProfiles();
+            WriteTargetLists();
+            SetStatusMessage("Renamed profile to " + selected.Name + ".", Color.FromArgb(28, 140, 64), true);
+            SetDirty(false);
+        }
+
+        private void DeleteProfile()
+        {
+            var selectedMeta = GetSelectedProfileMeta();
+            if (selectedMeta == null || _profileStore.Profiles == null || _profileStore.Profiles.Count <= 1) return;
+            if (MessageBox.Show(this, "Delete profile \"" + selectedMeta.Name + "\"?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            _profileStore.Profiles.RemoveAll(p => string.Equals(p.Id, selectedMeta.Id, StringComparison.OrdinalIgnoreCase));
+            DeleteProfileSnapshot(selectedMeta.Id);
+            var replacement = _profileStore.Profiles.First();
+            _profileStore.ActiveProfileId = replacement.Id;
+            if (string.Equals(_profileStore.AltTProfileId, selectedMeta.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                _profileStore.AltTProfileId = replacement.Id;
+            }
+            PopulateProfileSelectors();
+            ApplySnapshot(ReadProfileSnapshot(replacement.Id, replacement.Name));
+            SaveProfiles();
+            WriteTargetLists();
+            SetStatusMessage("Deleted profile " + selectedMeta.Name + ".", Color.FromArgb(28, 140, 64), true);
+            SetDirty(false);
+        }
+
+        private void UpdateAltTProfileState()
+        {
+            if (_altTProfileComboBox == null || _altTActionComboBox == null) return;
+            _altTProfileComboBox.Enabled = string.Equals(Convert.ToString(_altTActionComboBox.SelectedItem), "Quick Swap Profile", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void HandleProfileSelectionChanged()
+        {
+            if (_suppressProfileSelectionChanged) return;
+            SaveCurrentEditorIntoActiveProfile();
+            var selected = GetSelectedProfile();
+            if (selected == null) return;
+            ApplySnapshot(selected);
+            SaveProfiles();
+            WriteTargetLists();
+            SetStatusMessage("Switched to profile " + selected.Name + ".", Color.FromArgb(28, 140, 64), true);
+            SetDirty(false);
+        }
+
+        private static string ParseBehaviorMode(string text) { var match = Regex.Match(text, "TargetLists\\.BehaviorMode\\s*=\\s*[\"'](?<value>[^\"']+)[\"']", RegexOptions.IgnoreCase); return match.Success ? NormalizeBehaviorMode(match.Groups["value"].Value) : "Slepe Mode"; }
+        private static string ParseTacticsMode(string text) { var match = Regex.Match(text, "TargetLists\\.Mode\\s*=\\s*[\"'](?<mode>off|whitelist|blacklist)[\"']", RegexOptions.IgnoreCase); return match.Success ? NormalizeTacticsMode(match.Groups["mode"].Value) : "Off"; }
+
+        private static List<TacticEntry> ParseEntries(string text, string key)
+        {
+            var result = new List<TacticEntry>();
+            var tableMatch = Regex.Match(text, "TargetLists\\." + Regex.Escape(key) + "\\s*=\\s*\\{(?<body>[\\s\\S]*?)\\n\\}", RegexOptions.IgnoreCase);
+            if (!tableMatch.Success) return result;
+            foreach (Match rowMatch in Regex.Matches(tableMatch.Groups["body"].Value, "\\{(?<row>[^\\{\\}]*)\\}"))
+            {
+                var row = rowMatch.Groups["row"].Value;
+                var section = ParseStringField(row, "Section");
+                var mobId = ParseIntField(row, "MobID", 0);
+                if (mobId == 0) { if (!string.IsNullOrWhiteSpace(section)) result.Add(new TacticEntry { Section = section, IsSection = true, MonsterName = section, Skill = string.Empty, Behavior = string.Empty }); continue; }
+                result.Add(new TacticEntry { Section = string.Empty, IsSection = false, MobID = mobId, MonsterName = ParseStringField(row, "MonsterName"), Behavior = ParseStringField(row, "Behavior"), Skill = ParseStringField(row, "Skill"), SkillLevel = ParseIntField(row, "SkillLevel", 0) });
+            }
+            return result;
+        }
+
+        private static Dictionary<string, HomunculusSkillState> ParseHomunculusSkillSettings(string text)
+        {
+            var result = GetDefaultHomunculusSkillStates();
+            var body = ExtractAssignedTableBody(text, "TargetLists.HomunculusSkills");
+            if (string.IsNullOrWhiteSpace(body)) return result;
+            foreach (var family in HomunculusFamilies)
+            {
+                var familyBody = ExtractNamedTableBody(body, family);
+                if (string.IsNullOrWhiteSpace(familyBody)) continue;
+                foreach (var def in HomunculusSkillDefinitions.Where(item => string.Equals(item.Family, family, StringComparison.OrdinalIgnoreCase)))
+                {
+                    var skillBody = ExtractNamedTableBody(familyBody, def.SkillKey);
+                    if (string.IsNullOrWhiteSpace(skillBody)) continue;
+                    result[BuildSkillStateKey(def.Family, def.SkillKey)] = new HomunculusSkillState
+                    {
+                        MinSPPercent = ClampPercent(ParseIntField(skillBody, "MinSPPercent", def.DefaultMinSPPercent)),
+                        Level = ClampLevel(ParseIntField(skillBody, "Level", def.DefaultLevel)),
+                        OwnerHPPercent = ClampPercent(ParseIntField(skillBody, "OwnerHPPercent", 0)),
+                        HomunHPPercent = ClampPercent(ParseIntField(skillBody, "HomunHPPercent", 0))
+                    };
+                }
+            }
+            return result;
+        }
+
+        private static PatrolSettings ParsePatrolSettings(string text)
+        {
+            var result = new PatrolSettings { Enabled = false, Shape = "Square CW", Distance = 4 };
+            var body = ExtractAssignedTableBody(text, "TargetLists.Patrol");
+            if (string.IsNullOrWhiteSpace(body)) return result;
+            result.Enabled = Regex.IsMatch(body, "Enabled\\s*=\\s*true", RegexOptions.IgnoreCase);
+            result.Shape = NormalizePatrolShape(ParseStringField(body, "Shape"));
+            result.Distance = ClampPatrolDistance(ParseIntField(body, "Distance", 4));
+            return result;
+        }
+
+        private static RuntimeSettings GetDefaultRuntimeSettings()
+        {
+            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 500, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
+        }
+
+        private static RuntimeSettings ParseRuntimeSettings(string text)
+        {
+            var result = GetDefaultRuntimeSettings();
+            var body = ExtractAssignedTableBody(text, "TargetLists.Runtime");
+            if (string.IsNullOrWhiteSpace(body)) return result;
+            result.DefendOwner = !Regex.IsMatch(body, "DefendOwner\\s*=\\s*false", RegexOptions.IgnoreCase);
+            result.TurretStayOnCell = Regex.IsMatch(body, "TurretStayOnCell\\s*=\\s*true", RegexOptions.IgnoreCase);
+            result.AntiStuckEnabled = !Regex.IsMatch(body, "AntiStuckEnabled\\s*=\\s*false", RegexOptions.IgnoreCase);
+            result.AntiStuckMs = ClampRuntimeMs(ParseIntField(body, "AntiStuckMs", result.AntiStuckMs));
+            result.FollowOwnerOnMove = !Regex.IsMatch(body, "FollowOwnerOnMove\\s*=\\s*false", RegexOptions.IgnoreCase);
+            result.FollowOwnerDelayMs = ClampRuntimeMs(ParseIntField(body, "FollowOwnerDelayMs", result.FollowOwnerDelayMs));
+            result.SoftResetMs = ClampRuntimeMs(ParseIntField(body, "SoftResetMs", result.SoftResetMs));
+            result.OwnerResumeMs = ClampRuntimeMs(ParseIntField(body, "OwnerResumeMs", result.OwnerResumeMs));
+            result.PostSkillWaitMs = ClampRuntimeMs(ParseIntField(body, "PostSkillWaitMs", result.PostSkillWaitMs));
+            result.DanceAttackEnabled = Regex.IsMatch(body, "DanceAttackEnabled\\s*=\\s*true", RegexOptions.IgnoreCase);
+            result.DanceMovingOnly = !Regex.IsMatch(body, "DanceMovingOnly\\s*=\\s*false", RegexOptions.IgnoreCase);
+            result.DanceEveryAttack = Regex.IsMatch(body, "DanceEveryAttack\\s*=\\s*true", RegexOptions.IgnoreCase);
+            result.DanceMoveMs = ClampRuntimeMs(ParseIntField(body, "DanceMoveMs", result.DanceMoveMs));
+            return result;
+        }
+
+        private static string ExtractAssignedTableBody(string text, string assignment)
+        {
+            var match = Regex.Match(text, Regex.Escape(assignment) + "\\s*=\\s*\\{", RegexOptions.IgnoreCase);
+            return match.Success ? ExtractTableBody(text, match.Index + match.Length - 1) : null;
+        }
+
+        private static string ExtractNamedTableBody(string text, string tableName)
+        {
+            var match = Regex.Match(text, "\\b" + Regex.Escape(tableName) + "\\b\\s*=\\s*\\{", RegexOptions.IgnoreCase);
+            return match.Success ? ExtractTableBody(text, match.Index + match.Length - 1) : null;
+        }
+
+        private static string ExtractTableBody(string text, int openBraceIndex)
+        {
+            if (openBraceIndex < 0 || openBraceIndex >= text.Length || text[openBraceIndex] != '{') return null;
+            var depth = 0;
+            for (var i = openBraceIndex; i < text.Length; i++)
+            {
+                if (text[i] == '{') depth++;
+                else if (text[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0) return text.Substring(openBraceIndex + 1, i - openBraceIndex - 1);
+                }
+            }
+            return null;
+        }
+
+        private static string ParseStringField(string row, string field) { var match = Regex.Match(row, field + "\\s*=\\s*[\"'](?<value>[^\"']*)[\"']", RegexOptions.IgnoreCase); return match.Success ? match.Groups["value"].Value : string.Empty; }
+        private static int ParseIntField(string row, string field, int defaultValue) { var match = Regex.Match(row, field + "\\s*=\\s*(\\d+)", RegexOptions.IgnoreCase); return match.Success ? int.Parse(match.Groups[1].Value) : defaultValue; }
+
+        private static void PopulateGrid(DataGridView grid, List<TacticEntry> entries)
+        {
+            grid.Rows.Clear();
+            foreach (var entry in entries)
+            {
+                var index = grid.Rows.Add(
+                    entry.IsSection ? (entry.Section ?? entry.MonsterName ?? string.Empty) : string.Empty,
+                    entry.IsSection ? string.Empty : entry.MobID.ToString(),
+                    entry.MonsterName ?? string.Empty,
+                    entry.IsSection ? string.Empty : NormalizeChoice(entry.Behavior, TacticBehaviorOptions),
+                    entry.IsSection ? string.Empty : NormalizeChoice(entry.Skill, SkillOptions),
+                    (entry.IsSection || entry.SkillLevel <= 0) ? string.Empty : entry.SkillLevel.ToString());
+                ApplyRowStyle(grid.Rows[index]);
+            }
+            RefreshRowStyles(grid);
+        }
+
+        private static List<TacticEntry> ReadEntries(DataGridView grid)
+        {
+            var result = new List<TacticEntry>();
+            var seen = new HashSet<int>();
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                if (row.IsNewRow) continue;
+                var section = Convert.ToString(row.Cells["Section"].Value);
+                var mobIdText = Convert.ToString(row.Cells["MobID"].Value);
+                var name = Convert.ToString(row.Cells["MonsterName"].Value);
+                var behavior = Convert.ToString(row.Cells["Behavior"].Value);
+                var skill = Convert.ToString(row.Cells["Skill"].Value);
+                var skillLevelText = Convert.ToString(row.Cells["SkillLevel"].Value);
+                if (string.IsNullOrWhiteSpace(section) && string.IsNullOrWhiteSpace(mobIdText) && string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(behavior) && string.IsNullOrWhiteSpace(skill) && string.IsNullOrWhiteSpace(skillLevelText)) continue;
+                if (string.IsNullOrWhiteSpace(mobIdText))
+                {
+                    var label = !string.IsNullOrWhiteSpace(section) ? section : name;
+                    if (string.IsNullOrWhiteSpace(label)) throw new InvalidOperationException("Section rows need a label.");
+                    result.Add(new TacticEntry { Section = label.Trim(), MonsterName = label.Trim(), IsSection = true, Behavior = string.Empty, Skill = string.Empty });
+                    continue;
+                }
+                int mobId;
+                if (!int.TryParse(mobIdText.Trim(), out mobId) || mobId <= 0) throw new InvalidOperationException("Invalid Mob ID: " + mobIdText);
+                int skillLevel = 0;
+                if (!string.IsNullOrWhiteSpace(skillLevelText) && (!int.TryParse(skillLevelText.Trim(), out skillLevel) || skillLevel < 1 || skillLevel > 5)) throw new InvalidOperationException("Invalid Skill Level for Mob ID " + mobId + ": " + skillLevelText);
+                if (seen.Add(mobId)) result.Add(new TacticEntry { Section = string.Empty, IsSection = false, MobID = mobId, MonsterName = (name ?? string.Empty).Trim(), Behavior = NormalizeChoice(behavior, TacticBehaviorOptions), Skill = NormalizeChoice(skill, SkillOptions), SkillLevel = skillLevel });
+            }
+            return result;
+        }
+
+        private static Dictionary<string, HomunculusSkillState> GetDefaultHomunculusSkillStates()
+        {
+            var result = new Dictionary<string, HomunculusSkillState>(StringComparer.OrdinalIgnoreCase);
+            foreach (var def in HomunculusSkillDefinitions) result[BuildSkillStateKey(def.Family, def.SkillKey)] = new HomunculusSkillState { MinSPPercent = def.DefaultMinSPPercent, Level = def.DefaultLevel, OwnerHPPercent = 0, HomunHPPercent = 0 };
+            return result;
+        }
+
+        private void ApplyHomunculusSkillSettings(Dictionary<string, HomunculusSkillState> settings)
+        {
+            foreach (var def in HomunculusSkillDefinitions)
+            {
+                SkillEditorRow row;
+                if (!_homunculusSkillRows.TryGetValue(BuildSkillStateKey(def.Family, def.SkillKey), out row)) continue;
+                HomunculusSkillState state;
+                if (!settings.TryGetValue(BuildSkillStateKey(def.Family, def.SkillKey), out state)) state = new HomunculusSkillState { MinSPPercent = def.DefaultMinSPPercent, Level = def.DefaultLevel, OwnerHPPercent = 0, HomunHPPercent = 0 };
+                row.MinSPPercent.Value = ClampPercent(state.MinSPPercent);
+                row.Level.SelectedItem = LevelToDisplay(ClampLevel(state.Level));
+            }
+
+            HomunculusSkillState chaotic;
+            if (!settings.TryGetValue(BuildSkillStateKey("Vanilmirth", "ChaoticBlessings"), out chaotic)) chaotic = new HomunculusSkillState { MinSPPercent = 40, Level = 0, OwnerHPPercent = 0, HomunHPPercent = 0 };
+            if (_chaoticBlessingsOwnerHpNumeric != null) _chaoticBlessingsOwnerHpNumeric.Value = ClampPercent(chaotic.OwnerHPPercent);
+            if (_chaoticBlessingsHomunHpNumeric != null) _chaoticBlessingsHomunHpNumeric.Value = ClampPercent(chaotic.HomunHPPercent);
+        }
+
+        private void ApplyPatrolSettings(PatrolSettings settings)
+        {
+            var patrol = settings ?? new PatrolSettings { Enabled = false, Shape = "Square CW", Distance = 4 };
+            _patrolEnabledCheckBox.Checked = patrol.Enabled;
+            _patrolShapeComboBox.SelectedItem = NormalizePatrolShape(patrol.Shape);
+            _patrolDistanceNumeric.Value = ClampPatrolDistance(patrol.Distance);
+        }
+
+        private void ApplyRuntimeSettings(RuntimeSettings settings)
+        {
+            var runtime = settings ?? GetDefaultRuntimeSettings();
+            _defendOwnerCheckBox.Checked = runtime.DefendOwner;
+            _turretStayOnCellCheckBox.Checked = runtime.TurretStayOnCell;
+            _antiStuckEnabledCheckBox.Checked = runtime.AntiStuckEnabled;
+            _antiStuckMsNumeric.Value = ClampRuntimeMs(runtime.AntiStuckMs);
+            _antiStuckMsNumeric.Enabled = _antiStuckEnabledCheckBox.Checked;
+            _followOwnerOnMoveCheckBox.Checked = runtime.FollowOwnerOnMove;
+            _followOwnerDelayMsNumeric.Value = ClampRuntimeMs(runtime.FollowOwnerDelayMs);
+            _followOwnerDelayMsNumeric.Enabled = _followOwnerOnMoveCheckBox.Checked;
+            _softResetMsNumeric.Value = ClampRuntimeMs(runtime.SoftResetMs);
+            _ownerResumeMsNumeric.Value = ClampRuntimeMs(runtime.OwnerResumeMs);
+            _postSkillWaitSecondsNumeric.Value = RuntimeMsToSeconds(runtime.PostSkillWaitMs);
+            _danceAttackEnabledCheckBox.Checked = runtime.DanceAttackEnabled;
+            _danceMovingOnlyCheckBox.Checked = runtime.DanceMovingOnly;
+            _danceEveryAttackCheckBox.Checked = runtime.DanceEveryAttack;
+            _danceMoveMsNumeric.Value = ClampRuntimeMs(runtime.DanceMoveMs);
+            UpdateDanceAttackControls();
+        }
+
+        private Dictionary<string, HomunculusSkillState> ReadHomunculusSkillSettings()
+        {
+            var result = new Dictionary<string, HomunculusSkillState>(StringComparer.OrdinalIgnoreCase);
+            foreach (var def in HomunculusSkillDefinitions)
+            {
+                SkillEditorRow row;
+                if (!_homunculusSkillRows.TryGetValue(BuildSkillStateKey(def.Family, def.SkillKey), out row)) continue;
+                var state = new HomunculusSkillState { MinSPPercent = ClampPercent((int)row.MinSPPercent.Value), Level = ClampLevel(DisplayToLevel(Convert.ToString(row.Level.SelectedItem))), OwnerHPPercent = 0, HomunHPPercent = 0 };
+                if (string.Equals(def.Family, "Vanilmirth", StringComparison.OrdinalIgnoreCase) && string.Equals(def.SkillKey, "ChaoticBlessings", StringComparison.OrdinalIgnoreCase))
+                {
+                    state.OwnerHPPercent = _chaoticBlessingsOwnerHpNumeric != null ? ClampPercent((int)_chaoticBlessingsOwnerHpNumeric.Value) : 0;
+                    state.HomunHPPercent = _chaoticBlessingsHomunHpNumeric != null ? ClampPercent((int)_chaoticBlessingsHomunHpNumeric.Value) : 0;
+                }
+                result[BuildSkillStateKey(def.Family, def.SkillKey)] = state;
+            }
+            return result;
+        }
+
+        private PatrolSettings ReadPatrolSettings()
+        {
+            return new PatrolSettings
+            {
+                Enabled = _patrolEnabledCheckBox.Checked,
+                Shape = NormalizePatrolShape(Convert.ToString(_patrolShapeComboBox.SelectedItem)),
+                Distance = ClampPatrolDistance((int)_patrolDistanceNumeric.Value)
+            };
+        }
+
+        private RuntimeSettings ReadRuntimeSettings()
+        {
+            return new RuntimeSettings
+            {
+                DefendOwner = _defendOwnerCheckBox.Checked,
+                TurretStayOnCell = _turretStayOnCellCheckBox.Checked,
+                AntiStuckEnabled = _antiStuckEnabledCheckBox.Checked,
+                AntiStuckMs = ClampRuntimeMs((int)_antiStuckMsNumeric.Value),
+                FollowOwnerOnMove = _followOwnerOnMoveCheckBox.Checked,
+                FollowOwnerDelayMs = ClampRuntimeMs((int)_followOwnerDelayMsNumeric.Value),
+                SoftResetMs = ClampRuntimeMs((int)_softResetMsNumeric.Value),
+                OwnerResumeMs = ClampRuntimeMs((int)_ownerResumeMsNumeric.Value),
+                PostSkillWaitMs = SecondsToRuntimeMs(_postSkillWaitSecondsNumeric.Value),
+                DanceAttackEnabled = _danceAttackEnabledCheckBox.Checked,
+                DanceMovingOnly = _danceMovingOnlyCheckBox.Checked,
+                DanceEveryAttack = _danceEveryAttackCheckBox.Checked,
+                DanceMoveMs = ClampRuntimeMs((int)_danceMoveMsNumeric.Value)
+            };
+        }
+
+        private void MoveSelectedRow(int direction)
+        {
+            var grid = ActiveGrid();
+            if (grid == null || grid.CurrentCell == null) return;
+            var source = grid.CurrentCell.RowIndex;
+            var target = source + direction;
+            if (source < 0 || target < 0 || source >= grid.Rows.Count || target >= grid.Rows.Count) return;
+            if (grid.Rows[source].IsNewRow || grid.Rows[target].IsNewRow) return;
+            var currentColumn = grid.CurrentCell.ColumnIndex;
+            var a = CaptureRow(grid.Rows[source]);
+            var b = CaptureRow(grid.Rows[target]);
+            ApplyRow(grid.Rows[source], b);
+            ApplyRow(grid.Rows[target], a);
+            RefreshRowStyles(grid);
+            grid.CurrentCell = grid.Rows[target].Cells[currentColumn];
+        }
+
+        private void AddSectionRow()
+        {
+            var grid = ActiveGrid();
+            if (grid == null) return;
+            var index = grid.Rows.Count - 1;
+            if (grid.CurrentCell != null && grid.CurrentCell.RowIndex >= 0 && grid.CurrentCell.RowIndex < grid.Rows.Count - 1) index = grid.CurrentCell.RowIndex + 1;
+            grid.Rows.Insert(index, "new_map", string.Empty, "new_map", string.Empty, string.Empty, string.Empty);
+            RefreshRowStyles(grid);
+            grid.CurrentCell = grid.Rows[index].Cells["MonsterName"];
+            grid.BeginEdit(true);
+        }
+
+        private void DeleteSelectedRow() { DeleteSelectedRow(ActiveGrid()); }
+
+        private void DeleteSelectedRow(DataGridView grid)
+        {
+            if (grid == null || grid.CurrentCell == null) return;
+            var index = grid.CurrentCell.RowIndex;
+            if (index < 0 || index >= grid.Rows.Count || grid.Rows[index].IsNewRow) return;
+            grid.Rows.RemoveAt(index);
+            RefreshRowStyles(grid);
+        }
+
+        private DataGridView ActiveGrid() { if (_whitelistGrid.Visible) return _whitelistGrid; if (_blacklistGrid.Visible) return _blacklistGrid; return null; }
+        private static object[] CaptureRow(DataGridViewRow row) { return new object[] { row.Cells["Section"].Value, row.Cells["MobID"].Value, row.Cells["MonsterName"].Value, row.Cells["Behavior"].Value, row.Cells["Skill"].Value, row.Cells["SkillLevel"].Value }; }
+        private static void ApplyRow(DataGridViewRow row, object[] values) { row.Cells["Section"].Value = values[0]; row.Cells["MobID"].Value = values[1]; row.Cells["MonsterName"].Value = values[2]; row.Cells["Behavior"].Value = values[3]; row.Cells["Skill"].Value = values[4]; row.Cells["SkillLevel"].Value = values[5]; ApplyRowStyle(row); }
+        private static void RefreshRowStyles(DataGridView grid) { foreach (DataGridViewRow row in grid.Rows) if (!row.IsNewRow) ApplyRowStyle(row); }
+        private static void ApplyRowStyle(DataGridViewRow row) { var section = Convert.ToString(row.Cells["Section"].Value); var mobId = Convert.ToString(row.Cells["MobID"].Value); var isSection = !string.IsNullOrWhiteSpace(section) && string.IsNullOrWhiteSpace(mobId); row.DefaultCellStyle.BackColor = isSection ? Color.FromArgb(238, 244, 252) : SystemColors.Window; row.DefaultCellStyle.Font = new Font("Segoe UI", 9f, isSection ? FontStyle.Bold : FontStyle.Regular); row.Cells["Behavior"].ReadOnly = isSection; row.Cells["Skill"].ReadOnly = isSection; row.Cells["SkillLevel"].ReadOnly = isSection; }
+
+        private void UpdateBehaviorDescription()
+        {
+            var mode = GetBehaviorMode();
+            if (mode == "Snipe") _behaviorDescriptionLabel.Text = "Snipe\n\nLong-range spell behavior. The homunculus tries to work from Caprice range, avoids normal melee attacking, and backs off to standby when nothing is in spell range.";
+            else if (mode == "Avoid") _behaviorDescriptionLabel.Text = "Avoid\n\nNon-combat behavior. The homunculus avoids engaging and tries to stay away from threatening mobs instead of committing to normal attacks.";
+            else if (mode == "React") _behaviorDescriptionLabel.Text = "React\n\nResponse-first behavior. The homunculus focuses on mobs that are involved with you, the homunculus itself, or your current target, instead of freely farming everything around it.";
+            else if (mode == "Attack") _behaviorDescriptionLabel.Text = "Attack\n\nStraight aggressive behavior. The homunculus commits to normal attacks, and when skills are allowed it can use Caprice directly on the target it is currently fighting.";
+            else _behaviorDescriptionLabel.Text = "Slepe Mode\n\nYour custom preferred behavior. This is the special mode with your tuned rules: skill-heavy openers, custom post-skill handoff logic, owner-protection peel behavior, anti-idle recovery, and the rule that once a mob has already been normally attacked it should stop receiving Slepe-style repeat skill behavior unless tactics explicitly override it.";
+        }
+
+        private void UpdateTacticsModeView()
+        {
+            var mode = GetSelectedTacticsMode();
+            _whitelistGrid.Visible = false;
+            _blacklistGrid.Visible = false;
+            _offLabel.Visible = false;
+            if (mode == "Whitelist") { _activeListLabel.Text = "Whitelist Tactics"; _whitelistGrid.Visible = true; }
+            else if (mode == "Blacklist") { _activeListLabel.Text = "Blacklist Tactics"; _blacklistGrid.Visible = true; }
+            else { _activeListLabel.Text = "Tactics"; _offLabel.Visible = true; }
+        }
+
+        private string GetBehaviorMode() { return NormalizeBehaviorMode(Convert.ToString(_behaviorComboBox.SelectedItem)); }
+        private string GetSelectedTacticsMode() { return NormalizeTacticsMode(Convert.ToString(_modeComboBox.SelectedItem)); }
+        private static string NormalizeBehaviorMode(string value) { foreach (var option in BehaviorOptions) if (string.Equals(option, value, StringComparison.OrdinalIgnoreCase)) return option; return "Slepe Mode"; }
+        private static string NormalizeTacticsMode(string value) { if (string.Equals(value, "Whitelist", StringComparison.OrdinalIgnoreCase)) return "Whitelist"; if (string.Equals(value, "Blacklist", StringComparison.OrdinalIgnoreCase)) return "Blacklist"; return "Off"; }
+        private static string NormalizePatrolShape(string value)
+        {
+            var text = (value ?? string.Empty).Trim();
+            if (string.Equals(text, "Square", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "Square CW", StringComparison.OrdinalIgnoreCase)) return "Square CW";
+            if (string.Equals(text, "Square CCW", StringComparison.OrdinalIgnoreCase)) return "Square CCW";
+            if (string.Equals(text, "Diamond", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "Diamond CW", StringComparison.OrdinalIgnoreCase)) return "Diamond CW";
+            if (string.Equals(text, "Diamond CCW", StringComparison.OrdinalIgnoreCase)) return "Diamond CCW";
+            if (string.Equals(text, "Circle", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "Circle CW", StringComparison.OrdinalIgnoreCase)) return "Circle CW";
+            if (string.Equals(text, "Circle CCW", StringComparison.OrdinalIgnoreCase)) return "Circle CCW";
+            return "Square CW";
+        }
+        private static string NormalizeChoice(string value, string[] options) { var trimmed = (value ?? string.Empty).Trim(); foreach (var option in options) if (string.Equals(option, trimmed, StringComparison.OrdinalIgnoreCase)) return option; return options.Length > 0 ? options[0] : string.Empty; }
+        private static string LevelToDisplay(int level) { return level < 1 ? "OFF" : "Lv" + level; }
+        private static int DisplayToLevel(string value) { var match = Regex.Match((value ?? string.Empty).Trim(), "(\\d+)"); return match.Success ? ClampLevel(int.Parse(match.Groups[1].Value)) : 0; }
+        private static int ClampLevel(int level) { if (level < 0) return 0; if (level > 5) return 5; return level; }
+        private static int ClampPercent(int value) { if (value < 0) return 0; if (value > 100) return 100; return value; }
+        private static int ClampPatrolDistance(int value) { if (value < 1) return 1; if (value > 12) return 12; return value; }
+        private static int ClampRuntimeMs(int value) { if (value < 0) return 0; if (value > 10000) return 10000; return value; }
+        private static decimal RuntimeMsToSeconds(int value) { return Math.Round(ClampRuntimeMs(value) / 1000m, 1); }
+        private static int SecondsToRuntimeMs(decimal value) { return ClampRuntimeMs((int)Math.Round(value * 1000m)); }
+        private static string BuildSkillStateKey(string family, string skillKey) { return family + "." + skillKey; }
+        private static List<TacticEntry> CloneEntries(List<TacticEntry> entries) { return (entries ?? new List<TacticEntry>()).Select(entry => new TacticEntry { Section = entry.Section, IsSection = entry.IsSection, MobID = entry.MobID, MonsterName = entry.MonsterName, Behavior = entry.Behavior, Skill = entry.Skill, SkillLevel = entry.SkillLevel }).ToList(); }
+        private static Dictionary<string, HomunculusSkillState> CloneSkillSettings(Dictionary<string, HomunculusSkillState> settings) { var result = new Dictionary<string, HomunculusSkillState>(StringComparer.OrdinalIgnoreCase); if (settings == null) return result; foreach (var pair in settings) result[pair.Key] = new HomunculusSkillState { MinSPPercent = pair.Value.MinSPPercent, Level = pair.Value.Level, OwnerHPPercent = pair.Value.OwnerHPPercent, HomunHPPercent = pair.Value.HomunHPPercent }; return result; }
+        private static RuntimeSettings CloneRuntimeSettings(RuntimeSettings settings) { var value = settings ?? GetDefaultRuntimeSettings(); return new RuntimeSettings { DefendOwner = value.DefendOwner, TurretStayOnCell = value.TurretStayOnCell, AntiStuckEnabled = value.AntiStuckEnabled, AntiStuckMs = ClampRuntimeMs(value.AntiStuckMs), FollowOwnerOnMove = value.FollowOwnerOnMove, FollowOwnerDelayMs = ClampRuntimeMs(value.FollowOwnerDelayMs), SoftResetMs = ClampRuntimeMs(value.SoftResetMs), OwnerResumeMs = ClampRuntimeMs(value.OwnerResumeMs), PostSkillWaitMs = ClampRuntimeMs(value.PostSkillWaitMs), DanceAttackEnabled = value.DanceAttackEnabled, DanceMovingOnly = value.DanceMovingOnly, DanceEveryAttack = value.DanceEveryAttack, DanceMoveMs = ClampRuntimeMs(value.DanceMoveMs) }; }
+        private static string PromptForText(IWin32Window owner, string title, string prompt, string initialValue)
+        {
+            using (var form = new Form())
+            {
+                form.Text = title;
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MinimizeBox = false;
+                form.MaximizeBox = false;
+                form.ClientSize = new Size(420, 130);
+                var label = new Label { Left = 12, Top = 12, Width = 390, Text = prompt };
+                var textBox = new TextBox { Left = 12, Top = 38, Width = 390, Text = initialValue ?? string.Empty };
+                var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 246, Width = 75, Top = 82 };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 327, Width = 75, Top = 82 };
+                form.Controls.Add(label);
+                form.Controls.Add(textBox);
+                form.Controls.Add(ok);
+                form.Controls.Add(cancel);
+                form.AcceptButton = ok;
+                form.CancelButton = cancel;
+                return form.ShowDialog(owner) == DialogResult.OK ? textBox.Text : null;
+            }
+        }
+
+        private static string BuildLua(string behaviorMode, string tacticsMode, List<TacticEntry> whitelist, List<TacticEntry> blacklist, Dictionary<string, HomunculusSkillState> homunculusSkillSettings, PatrolSettings patrolSettings, RuntimeSettings runtimeSettings)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("TargetLists = {}");
+            builder.AppendLine();
+            builder.AppendLine("TargetLists.BehaviorMode = \"" + EscapeLua(behaviorMode) + "\"");
+            builder.AppendLine("TargetLists.Mode = \"" + tacticsMode.ToLowerInvariant() + "\"");
+            builder.AppendLine("TargetLists.UseWhitelist = " + (tacticsMode == "Whitelist" ? "true" : "false"));
+            builder.AppendLine("TargetLists.UseBlacklist = " + (tacticsMode == "Blacklist" ? "true" : "false"));
+            builder.AppendLine();
+            builder.AppendLine("TargetLists.Patrol = { Enabled = " + ((patrolSettings != null && patrolSettings.Enabled) ? "true" : "false") + ", Shape = \"" + EscapeLua(NormalizePatrolShape(patrolSettings != null ? patrolSettings.Shape : "Square CW")) + "\", Distance = " + ClampPatrolDistance(patrolSettings != null ? patrolSettings.Distance : 4) + " }");
+            runtimeSettings = CloneRuntimeSettings(runtimeSettings);
+            builder.AppendLine("TargetLists.Runtime = { DefendOwner = " + (runtimeSettings.DefendOwner ? "true" : "false") + ", TurretStayOnCell = " + (runtimeSettings.TurretStayOnCell ? "true" : "false") + ", AntiStuckEnabled = " + (runtimeSettings.AntiStuckEnabled ? "true" : "false") + ", AntiStuckMs = " + runtimeSettings.AntiStuckMs + ", FollowOwnerOnMove = " + (runtimeSettings.FollowOwnerOnMove ? "true" : "false") + ", FollowOwnerDelayMs = " + runtimeSettings.FollowOwnerDelayMs + ", SoftResetMs = " + runtimeSettings.SoftResetMs + ", OwnerResumeMs = " + runtimeSettings.OwnerResumeMs + ", PostSkillWaitMs = " + runtimeSettings.PostSkillWaitMs + ", DanceAttackEnabled = " + (runtimeSettings.DanceAttackEnabled ? "true" : "false") + ", DanceMovingOnly = " + (runtimeSettings.DanceMovingOnly ? "true" : "false") + ", DanceEveryAttack = " + (runtimeSettings.DanceEveryAttack ? "true" : "false") + ", DanceMoveMs = " + runtimeSettings.DanceMoveMs + " }");
+            builder.AppendLine();
+            builder.AppendLine("TargetLists.HomunculusSkills = {");
+            AppendHomunculusSkills(builder, homunculusSkillSettings);
+            builder.AppendLine("}");
+            builder.AppendLine();
+            builder.AppendLine("TargetLists.Whitelist = {");
+            AppendEntries(builder, whitelist);
+            builder.AppendLine("}");
+            builder.AppendLine();
+            builder.AppendLine("TargetLists.Blacklist = {");
+            AppendEntries(builder, blacklist);
+            builder.AppendLine("}");
+            return builder.ToString();
+        }
+
+        private static void AppendHomunculusSkills(StringBuilder builder, Dictionary<string, HomunculusSkillState> settings)
+        {
+            foreach (var family in HomunculusFamilies)
+            {
+                builder.AppendLine("    " + family + " = {");
+                foreach (var def in HomunculusSkillDefinitions.Where(item => string.Equals(item.Family, family, StringComparison.OrdinalIgnoreCase)))
+                {
+                    HomunculusSkillState state;
+                    if (!settings.TryGetValue(BuildSkillStateKey(def.Family, def.SkillKey), out state)) state = new HomunculusSkillState { MinSPPercent = def.DefaultMinSPPercent, Level = def.DefaultLevel, OwnerHPPercent = 0, HomunHPPercent = 0 };
+                    var line = new StringBuilder();
+                    line.Append("        ").Append(def.SkillKey).Append(" = { MinSPPercent = ").Append(ClampPercent(state.MinSPPercent)).Append(", Level = ").Append(ClampLevel(state.Level));
+                    if (string.Equals(def.Family, "Vanilmirth", StringComparison.OrdinalIgnoreCase) && string.Equals(def.SkillKey, "ChaoticBlessings", StringComparison.OrdinalIgnoreCase))
+                    {
+                        line.Append(", OwnerHPPercent = ").Append(ClampPercent(state.OwnerHPPercent));
+                        line.Append(", HomunHPPercent = ").Append(ClampPercent(state.HomunHPPercent));
+                    }
+                    line.Append(" },");
+                    builder.AppendLine(line.ToString());
+                }
+                builder.AppendLine("    },");
+            }
+        }
+
+        private static void AppendEntries(StringBuilder builder, List<TacticEntry> entries)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.IsSection) { builder.AppendLine("    { Section = \"" + EscapeLua(entry.Section) + "\" },"); continue; }
+                var line = new StringBuilder();
+                line.Append("    { MobID = ").Append(entry.MobID);
+                line.Append(", MonsterName = \"").Append(EscapeLua(entry.MonsterName ?? string.Empty)).Append("\"");
+                line.Append(", Behavior = \"").Append(EscapeLua(string.IsNullOrWhiteSpace(entry.Behavior) ? "Attack" : entry.Behavior)).Append("\"");
+                line.Append(", Skill = \"").Append(EscapeLua(string.IsNullOrWhiteSpace(entry.Skill) ? "No Skill" : entry.Skill)).Append("\"");
+                line.Append(", SkillLevel = ").Append(entry.SkillLevel);
+                line.Append(" },");
+                builder.AppendLine(line.ToString());
+            }
+        }
+
+        private static string EscapeLua(string value) { return (value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\""); }
+    }
+}

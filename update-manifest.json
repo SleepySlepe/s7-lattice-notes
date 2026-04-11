@@ -1,0 +1,37 @@
+{
+  "version": "0.1.0",
+  "channel": "stable",
+  "files": [
+    {
+      "path": "AI.lua",
+      "kind": "lua"
+    },
+    {
+      "path": "Const.lua",
+      "kind": "lua"
+    },
+    {
+      "path": "Util.lua",
+      "kind": "lua"
+    },
+    {
+      "path": "SlepeAI Settings.exe",
+      "kind": "editor"
+    },
+    {
+      "path": "SlepeAI Settings.cs",
+      "kind": "source"
+    }
+  ],
+  "preserve": [
+    "TargetLists.lua",
+    "SlepeAI Settings Profiles.json",
+    "Profiles/",
+    "*.bak"
+  ],
+  "notes": [
+    "Updater payloads must never overwrite user tactics, runtime behavior settings, homunculus skill settings, patrol settings, profile metadata, or profile snapshots.",
+    "TargetLists.lua stores tactics, behavior mode, patrol, runtime settings, and homunculus skill settings.",
+    "SlepeAI Settings Profiles.json and Profiles/ store profile state."
+  ]
+}
