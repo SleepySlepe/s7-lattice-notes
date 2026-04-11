@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
@@ -32,6 +34,8 @@ namespace MobListEditor
     internal sealed class EditorProfileStore { public string ActiveProfileId; public string AltTAction; public string AltTProfileId; public List<EditorProfileMeta> Profiles; }
     internal sealed class LegacyEditorProfileStore { public string ActiveProfileId; public string AltTAction; public string AltTProfileId; public List<EditorProfileSnapshot> Profiles; }
     internal sealed class ProfileListItem { public string Id; public string Name; public ProfileListItem(string id, string name) { Id = id; Name = name; } public override string ToString() { return Name; } }
+    internal sealed class UpdateManifest { public string Version; public string Channel; public List<UpdateFile> Files; public List<string> Preserve; public List<string> Notes; }
+    internal sealed class UpdateFile { public string Path; public string Kind; }
 
     internal sealed class MainForm : Form
     {
@@ -41,6 +45,27 @@ namespace MobListEditor
         private static readonly string[] SkillLevelOptions = { "", "1", "2", "3", "4", "5" };
         private static readonly string[] HomunculusSkillLevelOptions = { "OFF", "Lv1", "Lv2", "Lv3", "Lv4", "Lv5" };
         private static readonly string[] HomunculusFamilies = { "Amistr", "Filir", "Lif", "Vanilmirth" };
+        private static readonly string[] UpdateManifestUrls =
+        {
+            "https://raw.githubusercontent.com/SleepySlepe/s7-lattice-notes/main/update-manifest.json",
+            "https://raw.githubusercontent.com/SleepySlepe/s7-lattice-notes/master/update-manifest.json",
+            "https://github.com/SleepySlepe/s7-lattice-notes/raw/refs/heads/main/update-manifest.json",
+            "https://github.com/SleepySlepe/s7-lattice-notes/raw/refs/heads/master/update-manifest.json"
+        };
+        private static readonly string[] AllowedUpdateFiles =
+        {
+            "AI.lua",
+            "Const.lua",
+            "Util.lua",
+            "SlepeAI Settings.exe",
+            "SlepeAI Settings.cs"
+        };
+        private static readonly string[] ProtectedUpdateFiles =
+        {
+            "TargetLists.lua",
+            "SlepeAI Settings Profiles.json",
+            "Profiles"
+        };
         private static readonly HomunculusSkillDefinition[] HomunculusSkillDefinitions =
         {
             new HomunculusSkillDefinition("Amistr", "Bulwark", "Bulwark", 40, 0),
@@ -128,17 +153,21 @@ namespace MobListEditor
             BuildHomunculusSkillsTab(homunculusSkillsTab);
             HookDirtyTracking(this);
 
-            var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true };
+            var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true };
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             root.Controls.Add(footer, 0, 1);
             _statusLabel = new Label { AutoSize = true, Text = "Ready", Anchor = AnchorStyles.Left, Margin = new Padding(0, 10, 0, 0), ForeColor = Color.FromArgb(70, 70, 70), Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
             footer.Controls.Add(_statusLabel, 0, 0);
             _statusClearTimer = new Timer { Interval = 5000 };
             _statusClearTimer.Tick += delegate { _statusClearTimer.Stop(); SetStatusMessage("Ready", Color.FromArgb(70, 70, 70), false); };
+            var updateButton = new Button { Text = "Check Updates", AutoSize = true, Margin = new Padding(8, 6, 0, 0) };
+            updateButton.Click += delegate { CheckForUpdates(); };
+            footer.Controls.Add(updateButton, 1, 0);
             var saveButton = new Button { Text = "Save Lua", AutoSize = true, Margin = new Padding(8, 6, 0, 0) };
             saveButton.Click += delegate { SaveFile(); };
-            footer.Controls.Add(saveButton, 1, 0);
+            footer.Controls.Add(saveButton, 2, 0);
 
             UpdateBehaviorDescription();
             UpdateTacticsModeView();
@@ -653,6 +682,191 @@ namespace MobListEditor
                 SetStatusMessage("Save failed", Color.FromArgb(180, 45, 45), true);
                 return false;
             }
+        }
+
+        private void CheckForUpdates()
+        {
+            if (_isDirty)
+            {
+                var saveResult = MessageBox.Show(this, "Save your settings before checking for updates?", "Save Settings?", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                if (saveResult == DialogResult.Cancel) return;
+                if (saveResult == DialogResult.Yes && SaveFile() == false) return;
+            }
+
+            if (MessageBox.Show(this, "Download updates from SleepySlepe/s7-lattice-notes?\n\nThe updater will only replace code/editor files and will not overwrite TargetLists.lua, profiles, or other settings.", "Check Updates", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                SetStatusMessage("Checking for updates...", Color.FromArgb(70, 70, 70), false);
+                var result = ApplyUpdatesFromManifest();
+                if (result.EditorUpdatePending)
+                {
+                    SetStatusMessage("Update downloaded. Restarting editor...", Color.FromArgb(28, 140, 64), false);
+                    LaunchSelfUpdateScript(result.PendingEditorPath);
+                    Close();
+                    return;
+                }
+
+                SetStatusMessage("Updated " + result.UpdatedCount + " file(s). Settings were preserved.", Color.FromArgb(28, 140, 64), true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                SetStatusMessage("Update failed", Color.FromArgb(180, 45, 45), true);
+            }
+        }
+
+        private sealed class UpdateResult
+        {
+            public int UpdatedCount;
+            public bool EditorUpdatePending;
+            public string PendingEditorPath;
+        }
+
+        private UpdateResult ApplyUpdatesFromManifest()
+        {
+            using (var client = CreateUpdateWebClient())
+            {
+                string manifestUrl;
+                var manifest = DownloadManifest(client, out manifestUrl);
+                var rawBaseUrl = manifestUrl.Substring(0, manifestUrl.LastIndexOf('/') + 1);
+                var result = new UpdateResult();
+
+                if (manifest.Files == null || manifest.Files.Count == 0)
+                {
+                    throw new InvalidOperationException("The update manifest did not list any files.");
+                }
+
+                foreach (var updateFile in manifest.Files)
+                {
+                    var relativePath = NormalizeUpdatePath(updateFile != null ? updateFile.Path : null);
+                    if (string.IsNullOrWhiteSpace(relativePath) || IsAllowedUpdateFile(relativePath) == false || IsProtectedUpdateFile(relativePath))
+                    {
+                        continue;
+                    }
+
+                    var destinationPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, relativePath);
+                    EnsurePathStaysInAppDirectory(destinationPath);
+                    var downloadUrl = rawBaseUrl + EscapeRawPath(relativePath);
+                    var tempPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".update-" + Path.GetFileName(relativePath) + "-" + Guid.NewGuid().ToString("N") + ".tmp");
+                    client.DownloadFile(downloadUrl, tempPath);
+
+                    if (IsSelfExecutable(destinationPath))
+                    {
+                        var pendingPath = destinationPath + ".pending";
+                        File.Copy(tempPath, pendingPath, true);
+                        File.Delete(tempPath);
+                        result.EditorUpdatePending = true;
+                        result.PendingEditorPath = pendingPath;
+                        result.UpdatedCount++;
+                        continue;
+                    }
+
+                    BackupExistingFile(destinationPath);
+                    File.Copy(tempPath, destinationPath, true);
+                    File.Delete(tempPath);
+                    result.UpdatedCount++;
+                }
+
+                return result;
+            }
+        }
+
+        private WebClient CreateUpdateWebClient()
+        {
+            ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol | (SecurityProtocolType)3072;
+            var client = new WebClient();
+            client.Headers.Add("User-Agent", "SlepeAI-Settings-Updater");
+            client.Headers.Add("Cache-Control", "no-cache");
+            return client;
+        }
+
+        private UpdateManifest DownloadManifest(WebClient client, out string manifestUrl)
+        {
+            Exception lastError = null;
+            foreach (var url in UpdateManifestUrls)
+            {
+                try
+                {
+                    var text = client.DownloadString(url);
+                    var manifest = _serializer.Deserialize<UpdateManifest>(text);
+                    if (manifest == null)
+                    {
+                        throw new InvalidOperationException("The update manifest was empty.");
+                    }
+
+                    manifestUrl = url;
+                    return manifest;
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                }
+            }
+
+            throw new InvalidOperationException("Could not download update-manifest.json from GitHub.", lastError);
+        }
+
+        private static string NormalizeUpdatePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return "";
+            return path.Replace('\\', '/').Trim().TrimStart('/');
+        }
+
+        private static bool IsAllowedUpdateFile(string relativePath)
+        {
+            return AllowedUpdateFiles.Any(file => string.Equals(file, relativePath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsProtectedUpdateFile(string relativePath)
+        {
+            if (relativePath.EndsWith(".bak", StringComparison.OrdinalIgnoreCase)) return true;
+            return ProtectedUpdateFiles.Any(file => string.Equals(file, relativePath, StringComparison.OrdinalIgnoreCase) || relativePath.StartsWith(file + "/", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string EscapeRawPath(string relativePath)
+        {
+            return string.Join("/", relativePath.Split('/').Select(Uri.EscapeDataString).ToArray());
+        }
+
+        private static void EnsurePathStaysInAppDirectory(string path)
+        {
+            var basePath = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory);
+            var fullPath = Path.GetFullPath(path);
+            if (fullPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase) == false)
+            {
+                throw new InvalidOperationException("Update path is outside the AI folder: " + path);
+            }
+        }
+
+        private static bool IsSelfExecutable(string destinationPath)
+        {
+            return string.Equals(Path.GetFullPath(destinationPath), Path.GetFullPath(Application.ExecutablePath), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void BackupExistingFile(string destinationPath)
+        {
+            if (File.Exists(destinationPath) == false) return;
+            var backupPath = destinationPath + "." + DateTime.Now.ToString("yyyyMMddHHmmss") + ".bak";
+            File.Copy(destinationPath, backupPath, true);
+        }
+
+        private static void LaunchSelfUpdateScript(string pendingEditorPath)
+        {
+            var exePath = Application.ExecutablePath;
+            var scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ApplySlepeAIUpdate.cmd");
+            var script = new StringBuilder();
+            script.AppendLine("@echo off");
+            script.AppendLine("ping 127.0.0.1 -n 2 > nul");
+            script.AppendLine("copy /Y \"" + pendingEditorPath + "\" \"" + exePath + "\" > nul");
+            script.AppendLine("del \"" + pendingEditorPath + "\" > nul 2> nul");
+            script.AppendLine("start \"\" \"" + exePath + "\"");
+            script.AppendLine("del \"%~f0\" > nul 2> nul");
+            File.WriteAllText(scriptPath, script.ToString(), new UTF8Encoding(false));
+            Process.Start(new ProcessStartInfo { FileName = scriptPath, WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory, WindowStyle = ProcessWindowStyle.Hidden });
         }
 
         private void WriteTargetLists()

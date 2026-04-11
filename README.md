@@ -11,6 +11,8 @@ Patchable files:
 - `Util.lua`
 - `SlepeAI Settings.exe`
 - `SlepeAI Settings.cs`
+- `SlepeAI Patcher.exe`
+- `SlepeAI Patcher.cs`
 
 Protected user settings:
 

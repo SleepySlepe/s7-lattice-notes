@@ -1366,7 +1366,7 @@ function SlepeModeDisallowsSkillAfterAttack(id)
 	return UsesSlepeCurrentTargetSkillRule(id) and WasAttacked(id)
 end
 
-function TargetAllowsSkill(id)
+function TargetAllowsSkill(id, allowSlepeAfterAttack)
 	if TargetUsesKiteNoAttackBehavior(id) then
 		return false
 	end
@@ -1376,7 +1376,9 @@ function TargetAllowsSkill(id)
 		return false
 	end
 
-	if SlepeModeDisallowsSkillAfterAttack(id) then
+	if allowSlepeAfterAttack ~= true
+		and SlepeModeDisallowsSkillAfterAttack(id)
+		and HasTacticRepeatSkillMode(id) == false then
 		return false
 	end
 
@@ -1389,9 +1391,48 @@ function TargetAllowsSkill(id)
 	return true
 end
 
-function AllowsRepeatSkillOnCurrentTarget(id)
-	local skillMode = GetTargetSkillMode(id)
+function HasTacticRepeatSkillMode(id)
+	local tactic = GetMonsterTactic(id)
+	if tactic == nil then
+		return false
+	end
+
+	local skillMode = NormalizeSkillModeValue(tactic.Skill)
 	return skillMode == "Two Skills" or skillMode == "Max Skills"
+end
+
+function AllowsRepeatSkillOnCurrentTarget(id)
+	return HasTacticRepeatSkillMode(id)
+end
+
+function AllowsSlepeCurrentTargetFallbackSkill(id)
+	return UsesSlepeCurrentTargetSkillRule(id)
+		and HasTacticRepeatSkillMode(id)
+end
+
+function TargetAllowsSlepeCurrentTargetFallbackSkill(id)
+	if TargetUsesKiteNoAttackBehavior(id) then
+		return false
+	end
+
+	local skillMode = GetTargetSkillMode(id)
+	if skillMode == "No Skill" then
+		return false
+	end
+
+	if HasTacticRepeatSkillMode(id) then
+		if skillMode == "Two Skills" then
+			return GetSkillCastCount(id) < 2
+		end
+
+		return true
+	end
+
+	if WasAttacked(id) then
+		return false
+	end
+
+	return GetSkillCastCount(id) < 1
 end
 
 function UsesSlepeCurrentTargetSkillRule(id)
@@ -2642,9 +2683,7 @@ function TryCastCaprice()
 
 	local excludedTarget = 0
 	if AttackTarget ~= 0
-		and AttackTargetHit == 1
-		and UsesSlepeCurrentTargetSkillRule(AttackTarget)
-		and AllowsRepeatSkillOnCurrentTarget(AttackTarget) == false then
+		and UsesSlepeCurrentTargetSkillRule(AttackTarget) then
 		excludedTarget = AttackTarget
 	end
 
@@ -2665,14 +2704,26 @@ function TryCastCaprice()
 		and TargetAllowsSkill(AttackTarget)
 		and InSkillRange(MyID, AttackTarget, skillID, GetTargetSkillLevel(AttackTarget)) then
 		skillTarget = AttackTarget
-	elseif PendingCapriceAt ~= 0 and IsValidTarget(PendingCapriceTarget) and IsIgnoredTarget(PendingCapriceTarget) == false and IsKSTarget(PendingCapriceTarget) == false
+	elseif PendingCapriceAt ~= 0 and PendingCapriceTarget ~= excludedTarget and IsValidTarget(PendingCapriceTarget) and IsIgnoredTarget(PendingCapriceTarget) == false and IsKSTarget(PendingCapriceTarget) == false
 		and IsTargetInActiveRange(PendingCapriceTarget)
 		and TargetAllowsSkill(PendingCapriceTarget)
 		and InSkillRange(MyID, PendingCapriceTarget, skillID, GetTargetSkillLevel(PendingCapriceTarget)) then
 		skillTarget = PendingCapriceTarget
 	else
 		skillTarget = FindMonsterInSkillRange(excludedTarget)
-		if skillTarget == 0 and excludedTarget == 0 then
+		if skillTarget == 0
+			and excludedTarget == AttackTarget
+			and AttackTarget ~= 0
+			and AllowsSlepeCurrentTargetFallbackSkill(AttackTarget)
+			and IsValidTarget(AttackTarget)
+			and IsIgnoredTarget(AttackTarget) == false
+			and IsKSTarget(AttackTarget) == false
+			and IsTargetInActiveRange(AttackTarget)
+			and TargetUsesAvoidBehavior(AttackTarget) == false
+			and TargetAllowsSlepeCurrentTargetFallbackSkill(AttackTarget)
+			and InSkillRange(MyID, AttackTarget, skillID, GetTargetSkillLevel(AttackTarget)) then
+			skillTarget = AttackTarget
+		elseif skillTarget == 0 and excludedTarget == 0 then
 			skillTarget = FindMonsterInSkillRange(0)
 		end
 	end

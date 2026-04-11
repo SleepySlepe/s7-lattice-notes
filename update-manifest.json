@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.3",
   "channel": "stable",
   "files": [
     {
@@ -20,6 +20,14 @@
     },
     {
       "path": "SlepeAI Settings.cs",
+      "kind": "source"
+    },
+    {
+      "path": "SlepeAI Patcher.exe",
+      "kind": "patcher"
+    },
+    {
+      "path": "SlepeAI Patcher.cs",
       "kind": "source"
     }
   ],
