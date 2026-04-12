@@ -38,6 +38,7 @@ namespace SlepeAIPatcher
         private static readonly string[] AllowedUpdateFiles =
         {
             "AI.lua",
+            "AI_M.lua",
             "Const.lua",
             "Util.lua",
             "SlepeAI Settings.exe",

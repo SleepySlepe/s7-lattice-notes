@@ -55,6 +55,7 @@ namespace MobListEditor
         private static readonly string[] AllowedUpdateFiles =
         {
             "AI.lua",
+            "AI_M.lua",
             "Const.lua",
             "Util.lua",
             "SlepeAI Settings.exe",
@@ -102,7 +103,7 @@ namespace MobListEditor
         private NumericUpDown _followOwnerDelayMsNumeric;
         private NumericUpDown _softResetMsNumeric;
         private NumericUpDown _ownerResumeMsNumeric;
-        private NumericUpDown _postSkillWaitSecondsNumeric;
+        private NumericUpDown _postSkillWaitMsNumeric;
         private CheckBox _danceAttackEnabledCheckBox;
         private CheckBox _danceMovingOnlyCheckBox;
         private CheckBox _danceEveryAttackCheckBox;
@@ -299,7 +300,7 @@ namespace MobListEditor
             AddToggleTimingRow(layout, 1, "Abandon To Follow Owner", true, out _followOwnerOnMoveCheckBox, out _followOwnerDelayMsNumeric, 0, 5000, 0, "If enabled, the homunculus can drop what it is doing and follow you when you move. The number is the delay before that follow begins.");
             AddTimingRow(layout, 2, "Soft Reset Reassess (ms)", out _softResetMsNumeric, 100, 5000, 400, "How long the soft reset waits before it is allowed to look for a target again.");
             AddTimingRow(layout, 3, "Resume After Owner Stops (ms)", out _ownerResumeMsNumeric, 0, 2000, 100, "How long the homunculus keeps following you after you stop moving before it becomes aggressive again.");
-            AddSecondsTimingRow(layout, 4, "Post-Skill Wait (s)", out _postSkillWaitSecondsNumeric, 0.0m, 10.0m, 0.5m, "After casting on its current chase target, the homunculus stands still for this long before reassessing instead of falling straight into standby.");
+            AddTimingRow(layout, 4, "Post-Skill Wait (ms)", out _postSkillWaitMsNumeric, 0, 10000, 700, "After casting on its current chase target, the homunculus stands still for this long before reassessing instead of falling straight into standby.");
             AddDanceAttackRow(layout, 5);
 
             return group;
@@ -364,18 +365,6 @@ namespace MobListEditor
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             var title = new Label { Text = label, AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
             numeric = new NumericUpDown { Minimum = min, Maximum = max, Value = value, Width = 90, Margin = new Padding(0, 4, 10, 0) };
-            var help = CreateHelpLabel(description);
-            help.Margin = new Padding(0, 6, 0, 0);
-            layout.Controls.Add(title, 0, rowIndex);
-            layout.Controls.Add(numeric, 1, rowIndex);
-            layout.Controls.Add(help, 2, rowIndex);
-        }
-
-        private void AddSecondsTimingRow(TableLayoutPanel layout, int rowIndex, string label, out NumericUpDown numeric, decimal min, decimal max, decimal value, string description)
-        {
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            var title = new Label { Text = label, AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
-            numeric = new NumericUpDown { Minimum = min, Maximum = max, DecimalPlaces = 1, Increment = 0.1m, Value = value, Width = 90, Margin = new Padding(0, 4, 10, 0) };
             var help = CreateHelpLabel(description);
             help.Margin = new Padding(0, 6, 0, 0);
             layout.Controls.Add(title, 0, rowIndex);
@@ -1270,7 +1259,7 @@ namespace MobListEditor
 
         private static RuntimeSettings GetDefaultRuntimeSettings()
         {
-            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 500, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
+            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 700, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
         }
 
         private static RuntimeSettings ParseRuntimeSettings(string text)
@@ -1418,7 +1407,7 @@ namespace MobListEditor
             _followOwnerDelayMsNumeric.Enabled = _followOwnerOnMoveCheckBox.Checked;
             _softResetMsNumeric.Value = ClampRuntimeMs(runtime.SoftResetMs);
             _ownerResumeMsNumeric.Value = ClampRuntimeMs(runtime.OwnerResumeMs);
-            _postSkillWaitSecondsNumeric.Value = RuntimeMsToSeconds(runtime.PostSkillWaitMs);
+            _postSkillWaitMsNumeric.Value = ClampRuntimeMs(runtime.PostSkillWaitMs);
             _danceAttackEnabledCheckBox.Checked = runtime.DanceAttackEnabled;
             _danceMovingOnlyCheckBox.Checked = runtime.DanceMovingOnly;
             _danceEveryAttackCheckBox.Checked = runtime.DanceEveryAttack;
@@ -1466,7 +1455,7 @@ namespace MobListEditor
                 FollowOwnerDelayMs = ClampRuntimeMs((int)_followOwnerDelayMsNumeric.Value),
                 SoftResetMs = ClampRuntimeMs((int)_softResetMsNumeric.Value),
                 OwnerResumeMs = ClampRuntimeMs((int)_ownerResumeMsNumeric.Value),
-                PostSkillWaitMs = SecondsToRuntimeMs(_postSkillWaitSecondsNumeric.Value),
+                PostSkillWaitMs = ClampRuntimeMs((int)_postSkillWaitMsNumeric.Value),
                 DanceAttackEnabled = _danceAttackEnabledCheckBox.Checked,
                 DanceMovingOnly = _danceMovingOnlyCheckBox.Checked,
                 DanceEveryAttack = _danceEveryAttackCheckBox.Checked,
@@ -1563,8 +1552,6 @@ namespace MobListEditor
         private static int ClampPercent(int value) { if (value < 0) return 0; if (value > 100) return 100; return value; }
         private static int ClampPatrolDistance(int value) { if (value < 1) return 1; if (value > 12) return 12; return value; }
         private static int ClampRuntimeMs(int value) { if (value < 0) return 0; if (value > 10000) return 10000; return value; }
-        private static decimal RuntimeMsToSeconds(int value) { return Math.Round(ClampRuntimeMs(value) / 1000m, 1); }
-        private static int SecondsToRuntimeMs(decimal value) { return ClampRuntimeMs((int)Math.Round(value * 1000m)); }
         private static string BuildSkillStateKey(string family, string skillKey) { return family + "." + skillKey; }
         private static List<TacticEntry> CloneEntries(List<TacticEntry> entries) { return (entries ?? new List<TacticEntry>()).Select(entry => new TacticEntry { Section = entry.Section, IsSection = entry.IsSection, MobID = entry.MobID, MonsterName = entry.MonsterName, Behavior = entry.Behavior, Skill = entry.Skill, SkillLevel = entry.SkillLevel }).ToList(); }
         private static Dictionary<string, HomunculusSkillState> CloneSkillSettings(Dictionary<string, HomunculusSkillState> settings) { var result = new Dictionary<string, HomunculusSkillState>(StringComparer.OrdinalIgnoreCase); if (settings == null) return result; foreach (var pair in settings) result[pair.Key] = new HomunculusSkillState { MinSPPercent = pair.Value.MinSPPercent, Level = pair.Value.Level, OwnerHPPercent = pair.Value.OwnerHPPercent, HomunHPPercent = pair.Value.HomunHPPercent }; return result; }

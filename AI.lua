@@ -175,7 +175,7 @@ function EnsureRuntimeDefaults()
 	TargetLists.Runtime.SoftResetMs = ClampRuntimeMs(TargetLists.Runtime.SoftResetMs, 400, 100, 10000)
 	TargetLists.Runtime.OwnerResumeMs = ClampRuntimeMs(TargetLists.Runtime.OwnerResumeMs, 100, 0, 10000)
 	TargetLists.Runtime.DanceMoveMs = ClampRuntimeMs(TargetLists.Runtime.DanceMoveMs, 600, 100, 10000)
-	TargetLists.Runtime.PostSkillWaitMs = ClampRuntimeMs(TargetLists.Runtime.PostSkillWaitMs, 500, 0, 10000)
+	TargetLists.Runtime.PostSkillWaitMs = ClampRuntimeMs(TargetLists.Runtime.PostSkillWaitMs, 700, 0, 10000)
 end
 
 EnsureRuntimeDefaults()
@@ -301,6 +301,7 @@ KITE_AWAY_DISTANCE_CELLS = 5
 PATROL_MOVE_MS = 0
 PATROL_STALL_MS = 400
 SNIPE_ORBIT_MS = 300
+IDLE_STANDBY_REISSUE_MS = 250
 
 MyID = 0
 CurrentState = STATE_IDLE
@@ -363,6 +364,7 @@ PatrolLastPosY = -1
 WaitModeReadyAt = 0
 NextSnipeOrbitAt = 0
 SnipeOrbitStep = 1
+NextIdleStandbyMoveAt = 0
 
 function IsVanilmirth(id)
 	local homunType = GetV(V_HOMUNTYPE, id)
@@ -492,7 +494,7 @@ function IsKSTarget(target)
 
 	if chasing ~= 0 and chasing ~= MyID and chasing ~= owner then
 		for _, actor in ipairs(actors) do
-			if actor == chasing then
+			if actor == chasing and IsMonster(actor) ~= 1 then
 				return true
 			end
 		end
@@ -501,6 +503,7 @@ function IsKSTarget(target)
 	for _, actor in ipairs(actors) do
 		if actor ~= MyID
 			and actor ~= owner
+			and IsMonster(actor) ~= 1
 			and GetV(V_TARGET, actor) == target then
 			return true
 		end
@@ -1299,6 +1302,17 @@ function GetTargetSkillLevel(id)
 	return level
 end
 
+function ClampLevel(level)
+	local value = tonumber(level) or 0
+	if value < 1 then
+		return 0
+	elseif value > 5 then
+		return 5
+	end
+
+	return math.floor(value)
+end
+
 function GetOffensiveSkillSPCost(level)
 	if IsVanilmirth(MyID) then
 		return 20 + (level * 2)
@@ -1452,17 +1466,25 @@ function PrefersCurrentTargetForSkill(id)
 	return UsesSlepeCurrentTargetSkillRule(id) == false
 end
 
-function HandlePostSkillPrimaryTarget(target)
-	IgnorePrimarySkillTarget(target)
-	ClearAttackTarget()
+function HandlePostSkillPrimaryTarget(target, ignoreTarget)
+	if ignoreTarget == true then
+		IgnorePrimarySkillTarget(target)
+		ClearAttackTarget()
+	end
 	BeginPostSkillWait()
 end
 
 function ShouldPauseAfterPrimarySkillAttempt(castTarget)
 	return castTarget ~= 0
 		and castTarget == AttackTarget
+		and CurrentState == STATE_CHASE_ATTACK
 		and AttackTargetHit == 0
 		and UsesSlepeCurrentTargetSkillRule(castTarget)
+end
+
+function ShouldIgnoreAfterPrimarySkillAttempt(castTarget)
+	return ShouldPauseAfterPrimarySkillAttempt(castTarget)
+		and AttackTargetHit == 0
 		and AllowsRepeatSkillOnCurrentTarget(castTarget) == false
 end
 
@@ -1991,11 +2013,8 @@ function UpdateCapriceAttemptState()
 		if PendingCapriceTarget == ManualCapriceTarget then
 			ClearManualCapriceTarget()
 		end
-		if PendingCapriceTarget == AttackTarget
-			and AttackTargetHit == 0
-			and UsesSlepeCurrentTargetSkillRule(PendingCapriceTarget)
-			and AllowsRepeatSkillOnCurrentTarget(PendingCapriceTarget) == false then
-			HandlePostSkillPrimaryTarget(PendingCapriceTarget)
+		if ShouldPauseAfterPrimarySkillAttempt(PendingCapriceTarget) then
+			HandlePostSkillPrimaryTarget(PendingCapriceTarget, ShouldIgnoreAfterPrimarySkillAttempt(PendingCapriceTarget))
 		end
 
 		NextCapriceAt = PendingCapriceAt + PendingCapriceDelayMs
@@ -2300,6 +2319,28 @@ function ForceStandby()
 	ForceFollow()
 end
 
+function EnsureIdleStandby()
+	if AttackTarget ~= 0 or RequireStandbyReset == 1 then
+		return false
+	end
+
+	if IsAtStandbyCell() then
+		return false
+	end
+
+	if TryPatrol() then
+		return true
+	end
+
+	if GetTick() < NextIdleStandbyMoveAt and CurrentState == STATE_FOLLOW then
+		return true
+	end
+
+	ForceStandby()
+	NextIdleStandbyMoveAt = GetTick() + IDLE_STANDBY_REISSUE_MS
+	return true
+end
+
 function TryPatrol()
 	if PatrolEnabled() ~= true or AnchorEnabled == 1 then
 		return false
@@ -2396,10 +2437,6 @@ end
 
 function BeginPostSkillWait()
 	CancelSoftStandbyReset()
-	local myX, myY = GetV(V_POSITION, MyID)
-	if myX ~= -1 and myY ~= -1 then
-		ForceMoveTo(myX, myY)
-	end
 	WaitModeReadyAt = GetTick() + POST_SKILL_WAIT_MS
 	CurrentState = STATE_WAIT
 end
@@ -3461,7 +3498,7 @@ function TickIdle()
 		return
 	end
 
-	TryPatrol()
+	EnsureIdleStandby()
 end
 
 function TickFollow()
@@ -3496,7 +3533,10 @@ function TickFollow()
 
 	if IsAtStandbyCell() then
 		CurrentState = STATE_IDLE
+		return
 	end
+
+	EnsureIdleStandby()
 end
 
 function TickChaseAttack()
@@ -3540,7 +3580,7 @@ function TickChaseAttack()
 
 	local castTarget = TryCastConfiguredSkills()
 	if ShouldPauseAfterPrimarySkillAttempt(castTarget) then
-		HandlePostSkillPrimaryTarget(castTarget)
+		HandlePostSkillPrimaryTarget(castTarget, ShouldIgnoreAfterPrimarySkillAttempt(castTarget))
 		return
 	end
 
@@ -3633,7 +3673,7 @@ function TickAttack()
 
 	local castTarget = TryCastConfiguredSkills()
 	if ShouldPauseAfterPrimarySkillAttempt(castTarget) then
-		HandlePostSkillPrimaryTarget(castTarget)
+		HandlePostSkillPrimaryTarget(castTarget, ShouldIgnoreAfterPrimarySkillAttempt(castTarget))
 		return
 	end
 
@@ -4085,12 +4125,19 @@ function ForceImmediateActivity()
 		return
 	end
 
-	if IsAtStandbyCell() == false and GetV(V_MOTION, MyID) == MOTION_STAND then
-		ForceStandby()
-	end
+	EnsureIdleStandby()
+end
+
+function IsMercenaryCall(id)
+	local mercType = tonumber(GetV(V_MERTYPE, id)) or 0
+	return mercType > 0
 end
 
 function AI(myid)
+	if IsMercenaryCall(myid) then
+		return
+	end
+
 	MyID = myid
 	UpdateSPTracking()
 	UpdateCapriceAttemptState()

@@ -1,9 +1,13 @@
 {
-  "version": "0.1.3",
+  "version": "0.1.14",
   "channel": "stable",
   "files": [
     {
       "path": "AI.lua",
+      "kind": "lua"
+    },
+    {
+      "path": "AI_M.lua",
       "kind": "lua"
     },
     {
