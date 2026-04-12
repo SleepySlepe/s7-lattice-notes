@@ -4128,16 +4128,7 @@ function ForceImmediateActivity()
 	EnsureIdleStandby()
 end
 
-function IsMercenaryCall(id)
-	local mercType = tonumber(GetV(V_MERTYPE, id)) or 0
-	return mercType > 0
-end
-
 function AI(myid)
-	if IsMercenaryCall(myid) then
-		return
-	end
-
 	MyID = myid
 	UpdateSPTracking()
 	UpdateCapriceAttemptState()
