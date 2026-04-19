@@ -40,7 +40,7 @@ namespace MobListEditor
     internal sealed class MainForm : Form
     {
         private static readonly string[] BehaviorOptions = { "Slepe Mode", "Snipe", "Avoid", "React", "Attack" };
-        private static readonly string[] TacticBehaviorOptions = { "", "Slepe Mode", "Snipe First", "Snipe", "Snipe Last", "Avoid", "Kite Attack", "Kite No Attack", "Attack First", "Attack", "Attack Last", "React First", "React", "React Last" };
+        private static readonly string[] TacticBehaviorOptions = { "", "Slepe First", "Slepe Mode", "Slepe Last", "Snipe First", "Snipe", "Snipe Last", "Avoid", "Kite Attack", "Kite No Attack", "Attack First", "Attack", "Attack Last", "React First", "React", "React Last" };
         private static readonly string[] SkillOptions = { "", "No Skill", "One Skill", "Two Skills", "Max Skills" };
         private static readonly string[] SkillLevelOptions = { "", "1", "2", "3", "4", "5" };
         private static readonly string[] HomunculusSkillLevelOptions = { "OFF", "Lv1", "Lv2", "Lv3", "Lv4", "Lv5" };

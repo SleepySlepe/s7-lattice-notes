@@ -269,8 +269,12 @@ CAPRICE_DELAY_MS = 3000
 CHAOTIC_BLESSINGS_SP_COST = 40
 CHAOTIC_BLESSINGS_DELAY_MS = 3000
 CAPRICE_RETRY_MS = 100
+FILIR_OFFENSIVE_RETRY_MS = 100
 CAPRICE_CONFIRM_TIMEOUT_MS = 5000
 MANUAL_CAPRICE_TIMEOUT_MS = 5000
+FILIR_SUPPORT_CONFIRM_TIMEOUT_MS = 1000
+FILIR_SUPPORT_RETRY_MS = 500
+FILIR_SUPPORT_MAX_PERSIST_MS = 180000
 MOONLIGHT_SKILL = 8009
 FLITTING_SKILL = 8010
 ACCELERATED_FLIGHT_SKILL = 8011
@@ -283,6 +287,8 @@ DANCE_MOVE_MS = TargetLists.Runtime.DanceMoveMs
 DANCE_ATTACK_BUFFER_MS = 120
 STUCK_STAND_MS = TargetLists.Runtime.AntiStuckMs
 CHASE_LEAD_CELLS = 1
+FILIR_CHASE_LEAD_CELLS = 1
+FILIR_CHASE_REPATH_MS = 250
 SP_TICK_INTERVAL_MS = 10000
 SP_TICK_PAUSE_WINDOW_MS = 500
 ANCHOR_RANGE = 7
@@ -294,6 +300,12 @@ POST_SKILL_WAIT_MS = TargetLists.Runtime.PostSkillWaitMs
 POST_SKILL_IGNORE_MS = 400
 POST_PRIMARY_SKILL_IGNORE_MS = 1500
 UNREACHABLE_TARGET_IGNORE_MS = 3000
+CHASE_PROGRESS_CHECK_MS = 700
+CHASE_PROGRESS_MIN_GAIN = 1
+SIGHT_RECOVERY_STEP_CELLS = 5
+SIGHT_RECOVERY_REISSUE_MS = 350
+SIGHT_BREADCRUMB_DISTANCE = 2
+SIGHT_BACKTRACK_MIN_DISTANCE = 4
 OWNER_PROTECTION_REHIT_MS = 500
 OWNER_PROTECTION_HOLD_MS = 500
 AVOID_DISTANCE_CELLS = 12
@@ -314,6 +326,12 @@ NextCapriceAt = 0
 NextChaoticBlessingsAt = 0
 NextFlittingAt = 0
 NextAcceleratedFlightAt = 0
+PendingFilirSupportAt = 0
+PendingFilirSupportSP = 0
+PendingFilirSupportName = ""
+PendingFilirSupportCost = 0
+PendingFilirSupportDelayMs = 0
+FilirSupportCooldownsLoaded = false
 NextCapriceTryAt = 0
 PendingCapriceAt = 0
 PendingCapriceSP = 0
@@ -354,7 +372,20 @@ SkillCastCount = {}
 SkillCastCountByClass = {}
 LastSeenPosX = {}
 LastSeenPosY = {}
+Breadcrumb1X = {}
+Breadcrumb1Y = {}
+Breadcrumb2X = {}
+Breadcrumb2Y = {}
+Breadcrumb3X = {}
+Breadcrumb3Y = {}
 IgnoreTargetUntil = {}
+PathProbeTarget = 0
+PathProbeStartedAt = 0
+PathProbeBestDistance = 999
+PathProbeTargetX = -1
+PathProbeTargetY = -1
+SightRecoveryStep = 1
+NextSightRecoveryAt = 0
 PatrolStep = 1
 NextPatrolMoveAt = 0
 PatrolStuckSince = 0
@@ -404,6 +435,10 @@ function GetBehaviorMode()
 end
 
 function IsSnipeMode()
+	if IsFilir(MyID) then
+		return false
+	end
+
 	return GetBehaviorMode() == "Snipe"
 end
 
@@ -601,6 +636,10 @@ function HandleOwnerProtectionPriority()
 		CancelSoftStandbyReset()
 
 		if AttackTarget ~= peelTarget then
+			if IsCommittedToCurrentAttackTarget() then
+				return false
+			end
+
 			StartAttackChase(peelTarget)
 			ForceAttackChaseMovement()
 			return true
@@ -649,9 +688,13 @@ function HandleOwnerProtectionPriority()
 end
 
 function ClearAttackTarget()
+	local oldAttackTarget = AttackTarget
 	AttackTarget = 0
 	AttackTargetHit = 0
 	NextAttackRefreshMoveAt = 0
+	if oldAttackTarget ~= 0 then
+		ResetPathingProbe()
+	end
 end
 
 function WasAttacked(id)
@@ -712,6 +755,103 @@ function IsIgnoredTarget(id)
 	end
 
 	return true
+end
+
+function ResetPathingProbe()
+	PathProbeTarget = 0
+	PathProbeStartedAt = 0
+	PathProbeBestDistance = 999
+	PathProbeTargetX = -1
+	PathProbeTargetY = -1
+end
+
+function StartPathingProbe(target)
+	if target == 0 then
+		ResetPathingProbe()
+		return
+	end
+
+	local targetX, targetY = GetV(V_POSITION, target)
+	local distance = DistanceToActor(MyID, target)
+	PathProbeTarget = target
+	PathProbeStartedAt = GetTick()
+	PathProbeBestDistance = distance ~= -1 and distance or 999
+	PathProbeTargetX = targetX
+	PathProbeTargetY = targetY
+end
+
+function MarkPathingProgress(target, distance)
+	PathProbeBestDistance = distance
+	PathProbeStartedAt = GetTick()
+	local targetX, targetY = GetV(V_POSITION, target)
+	PathProbeTargetX = targetX
+	PathProbeTargetY = targetY
+end
+
+function CheckTargetPathingFailure(target)
+	if target == 0 or IsValidTarget(target) == false then
+		ResetPathingProbe()
+		return false
+	end
+
+	if IsOwnerProtectionAttackTarget(target) then
+		ResetPathingProbe()
+		return false
+	end
+
+	local distance = DistanceToActor(MyID, target)
+	if distance == -1 then
+		ResetPathingProbe()
+		return false
+	end
+
+	if distance <= AttackRange() or IsInAttackMotion(MyID) or AttackTargetHit == 1 then
+		ResetPathingProbe()
+		return false
+	end
+
+	local targetX, targetY = GetV(V_POSITION, target)
+	if PathProbeTarget ~= target
+		or targetX ~= PathProbeTargetX
+		or targetY ~= PathProbeTargetY then
+		StartPathingProbe(target)
+		return false
+	end
+
+	if distance <= PathProbeBestDistance - CHASE_PROGRESS_MIN_GAIN then
+		MarkPathingProgress(target, distance)
+		return false
+	end
+
+	if GetTick() - PathProbeStartedAt < CHASE_PROGRESS_CHECK_MS then
+		return false
+	end
+
+	if ShouldKeepCurrentTargetThroughRecovery(target) then
+		IgnoreTargetUntil[target] = nil
+		ResetPathingProbe()
+		NextChaseRepathAt = 0
+		return false
+	end
+
+	IgnoreTargetForDuration(target, UNREACHABLE_TARGET_IGNORE_MS)
+	ResetPathingProbe()
+	return true
+end
+
+function HandlePathingFailureTarget(target)
+	if target == 0 then
+		return
+	end
+
+	if AttackTarget == target then
+		ClearAttackTarget()
+	end
+
+	AcquireAttackTarget(target)
+	if AttackTarget == 0 then
+		BeginSoftStandbyReset(1, 1)
+	end
 end
 
 function GetMonsterTactic(id)
@@ -992,16 +1132,43 @@ end
 
 function GetTargetBehavior(id)
 	local tactic = GetMonsterTactic(id)
-	if tactic == nil then
-		return ""
+	if tactic ~= nil then
+		local behavior = string.lower(tostring(tactic.Behavior or ""))
+		if behavior ~= "" then
+			return NormalizeBehaviorForHomunculus(behavior)
+		end
 	end
 
-	return string.lower(tostring(tactic.Behavior or ""))
+	return NormalizeBehaviorForHomunculus(string.lower(tostring(GetBehaviorMode() or "Slepe Mode")))
+end
+
+function NormalizeBehaviorForHomunculus(behavior)
+	if IsFilir(MyID) == false then
+		return behavior
+	end
+
+	if behavior == "snipe first" then
+		return "attack first"
+	elseif behavior == "snipe" then
+		return "attack"
+	elseif behavior == "snipe last" then
+		return "attack last"
+	end
+
+	return behavior
 end
 
 function TargetUsesSnipeBehavior(id)
 	local behavior = GetTargetBehavior(id)
 	return behavior == "snipe" or behavior == "snipe first" or behavior == "snipe last"
+end
+
+function ShouldBlockNormalAttackCommand(target)
+	if target == nil or target == 0 then
+		return IsSnipeMode()
+	end
+
+	return TargetUsesSnipeBehavior(target)
 end
 
 function TargetUsesAvoidBehavior(id)
@@ -1129,11 +1296,14 @@ function HandlePostNormalAttack(target)
 		return
 	end
 
+	local wasAlreadyAttacked = WasAttacked(target)
 	MarkAttacked(target)
 	if IsTargetingOwner(target) then
 		MarkProtected(target)
-		ClearAttackTarget()
-		BeginOwnerProtectionHold()
+		if wasAlreadyAttacked == false then
+			ClearAttackTarget()
+			BeginOwnerProtectionHold()
+		end
 		return
 	end
 
@@ -1184,6 +1354,34 @@ function IsTargetingHomunculus(target)
 	return GetV(V_TARGET, target) == MyID
 end
 
+function IsCommittedToCurrentAttackTarget()
+	if AttackTarget == 0 or IsValidAttackTargetForCurrentPurpose(AttackTarget) == false then
+		return false
+	end
+
+	return AttackTargetHit == 1
+		or WasAttacked(AttackTarget)
+		or IsTargetingHomunculus(AttackTarget)
+		or CurrentState == STATE_ATTACK
+		or IsInAttackMotion(MyID)
+		or PendingCapriceTarget == AttackTarget
+end
+
+function ShouldKeepCurrentTargetThroughRecovery(target)
+	if target == 0
+		or target ~= AttackTarget
+		or IsFilir(MyID) == false
+		or IsCommittedToCurrentAttackTarget() == false
+		or IsValidAttackTargetForCurrentPurpose(target) == false
+		or TargetUsesAvoidBehavior(target)
+		or TargetUsesKiteNoAttackBehavior(target)
+		or IsKSTarget(target) then
+		return false
+	end
+
+	return true
+end
+
 function IsOwnerFocusingTarget(target)
 	if target == 0 or IsValidTarget(target) == false then
 		return false
@@ -1201,11 +1399,46 @@ function IsReactiveBehaviorTarget(target)
 	return IsTargetingOwner(target) or IsTargetingHomunculus(target)
 end
 
-function GetAttackBehaviorPriority(target)
-	local behavior = GetTargetBehavior(target)
-	if behavior == "" or behavior == "slepe mode" then
-		behavior = "attack"
+function NormalizePriorityBehavior(behavior)
+	if behavior == "" or behavior == "slepe mode" or behavior == "slepe" then
+		return "attack"
 	end
+
+	return behavior
+end
+
+function GetBehaviorHierarchyTier(behavior)
+	behavior = NormalizePriorityBehavior(behavior)
+
+	if behavior == "react first"
+		or behavior == "snipe first"
+		or behavior == "slepe first"
+		or behavior == "attack first" then
+		return 3
+	elseif behavior == "react last"
+		or behavior == "snipe last"
+		or behavior == "slepe last"
+		or behavior == "attack last" then
+		return 1
+	end
+
+	return 2
+end
+
+function GetAttackBehaviorTier(target)
+	if target == 0 or IsOwnerProtectionAttackTarget(target) then
+		return 4
+	end
+
+	if GetAttackBehaviorPriority(target) < 0 then
+		return -1
+	end
+
+	return GetBehaviorHierarchyTier(GetTargetBehavior(target))
+end
+
+function GetAttackBehaviorPriority(target)
+	local behavior = NormalizePriorityBehavior(GetTargetBehavior(target))
 
 	if behavior == "avoid" or behavior == "snipe" or behavior == "snipe first" or behavior == "snipe last" then
 		return -1
@@ -1217,33 +1450,34 @@ function GetAttackBehaviorPriority(target)
 
 	if behavior == "react first" then
 		if IsReactiveBehaviorTarget(target) then
-			return 650
+			return 900
 		end
 		return -1
+	elseif behavior == "slepe first" then
+		return 850
+	elseif behavior == "attack first" then
+		return 800
 	elseif behavior == "react" then
 		if IsReactiveBehaviorTarget(target) then
-			return 550
+			return 700
 		end
 		return -1
 	elseif behavior == "react last" then
 		if IsReactiveBehaviorTarget(target) then
-			return 450
+			return 300
 		end
 		return -1
-	elseif behavior == "attack first" then
-		return 350
+	elseif behavior == "slepe last" then
+		return 250
 	elseif behavior == "attack last" then
-		return 150
+		return 200
 	end
 
-	return 250
+	return 600
 end
 
 function GetSkillBehaviorPriority(target)
-	local behavior = GetTargetBehavior(target)
-	if behavior == "" or behavior == "slepe mode" then
-		behavior = "attack"
-	end
+	local behavior = NormalizePriorityBehavior(GetTargetBehavior(target))
 
 	if behavior == "avoid" or behavior == "kite no attack" then
 		return -1
@@ -1255,32 +1489,36 @@ function GetSkillBehaviorPriority(target)
 
 	if behavior == "react first" then
 		if IsReactiveBehaviorTarget(target) then
-			return 800
+			return 900
 		end
 		return -1
+	elseif behavior == "snipe first" then
+		return 850
+	elseif behavior == "slepe first" then
+		return 825
+	elseif behavior == "attack first" then
+		return 800
 	elseif behavior == "react" then
 		if IsReactiveBehaviorTarget(target) then
 			return 700
 		end
 		return -1
+	elseif behavior == "snipe" then
+		return 650
 	elseif behavior == "react last" then
 		if IsReactiveBehaviorTarget(target) then
-			return 600
+			return 300
 		end
 		return -1
-	elseif behavior == "snipe first" then
-		return 550
-	elseif behavior == "snipe" then
-		return 450
 	elseif behavior == "snipe last" then
-		return 350
-	elseif behavior == "attack first" then
-		return 500
+		return 250
+	elseif behavior == "slepe last" then
+		return 225
 	elseif behavior == "attack last" then
-		return 300
+		return 200
 	end
 
-	return 400
+	return 600
 end
 
 function GetTargetSkillLevel(id)
@@ -1325,9 +1563,9 @@ end
 
 function GetOffensiveSkillDelayMs(level)
 	if IsVanilmirth(MyID) then
-		return 2000 + (level * 200)
+		return 1800 + (level * 200)
 	elseif IsFilir(MyID) then
-		return 2000
+		return 200
 	end
 
 	return CAPRICE_DELAY_MS
@@ -1357,6 +1595,113 @@ function GetFilirSupportDelayMs(skillName, level)
 	end
 
 	return 0
+end
+
+function GetFilirSupportCooldownFile()
+	local owner = GetV(V_OWNER, MyID)
+	if owner == 0 then
+		return nil
+	end
+
+	return "./AI/USER_AI/data/H_" .. tostring(owner) .. "FilirSupport.lua"
+end
+
+function PersistFilirSupportCooldowns()
+	local path = GetFilirSupportCooldownFile()
+	if path == nil then
+		return
+	end
+
+	local file = io.open(path, "w")
+	if file == nil then
+		return
+	end
+
+	file:write("FilirSupportCooldowns={NextFlittingAt=" .. tostring(NextFlittingAt)
+		.. ",NextAcceleratedFlightAt=" .. tostring(NextAcceleratedFlightAt) .. "}\n")
+	file:close()
+end
+
+function UsePersistedFilirSupportTime(value)
+	local now = GetTick()
+	local readyAt = tonumber(value) or 0
+	if readyAt <= now or readyAt > now + FILIR_SUPPORT_MAX_PERSIST_MS then
+		return 0
+	end
+
+	return readyAt
+end
+
+function LoadFilirSupportCooldowns()
+	if FilirSupportCooldownsLoaded then
+		return
+	end
+
+	FilirSupportCooldownsLoaded = true
+	if IsFilir(MyID) == false then
+		return
+	end
+
+	local path = GetFilirSupportCooldownFile()
+	if path == nil then
+		return
+	end
+
+	local chunk = loadfile(path)
+	if chunk == nil then
+		return
+	end
+
+	local env = {}
+	setfenv(chunk, env)
+	local ok = pcall(chunk)
+	if ok == false or type(env.FilirSupportCooldowns) ~= "table" then
+		return
+	end
+
+	NextFlittingAt = UsePersistedFilirSupportTime(env.FilirSupportCooldowns.NextFlittingAt)
+	NextAcceleratedFlightAt = UsePersistedFilirSupportTime(env.FilirSupportCooldowns.NextAcceleratedFlightAt)
+end
+
+function SetNextFilirSupportAttempt(skillName, readyAt)
+	if skillName == "Flitting" then
+		NextFlittingAt = readyAt
+	elseif skillName == "AcceleratedFlight" then
+		NextAcceleratedFlightAt = readyAt
+	end
+
+	PersistFilirSupportCooldowns()
+end
+
+function ClearPendingFilirSupport()
+	PendingFilirSupportAt = 0
+	PendingFilirSupportSP = 0
+	PendingFilirSupportName = ""
+	PendingFilirSupportCost = 0
+	PendingFilirSupportDelayMs = 0
+end
+
+function HasPendingFilirSupport()
+	return PendingFilirSupportAt ~= 0
+end
+
+function UpdateFilirSupportAttemptState()
+	if PendingFilirSupportAt == 0 then
+		return
+	end
+
+	local sp = GetV(V_SP, MyID)
+	if PendingFilirSupportSP - sp >= PendingFilirSupportCost then
+		local readyAt = PendingFilirSupportAt + PendingFilirSupportDelayMs
+		SetNextFilirSupportAttempt(PendingFilirSupportName, readyAt)
+		ClearPendingFilirSupport()
+		return
+	end
+
+	if GetTick() - PendingFilirSupportAt >= FILIR_SUPPORT_CONFIRM_TIMEOUT_MS then
+		SetNextFilirSupportAttempt(PendingFilirSupportName, GetTick() + FILIR_SUPPORT_RETRY_MS)
+		ClearPendingFilirSupport()
+	end
 end
 
 function GetSkillCastCount(id)
@@ -1451,7 +1796,7 @@ end
 
 function UsesSlepeCurrentTargetSkillRule(id)
 	local behavior = GetTargetBehavior(id)
-	if behavior == "slepe mode" then
+	if behavior == "slepe mode" or behavior == "slepe first" or behavior == "slepe last" then
 		return true
 	end
 
@@ -1466,6 +1811,15 @@ function PrefersCurrentTargetForSkill(id)
 	return UsesSlepeCurrentTargetSkillRule(id) == false
 end
 
+function ShouldUseSlepeChaseOpenerSkill(id)
+	return id ~= 0
+		and id == AttackTarget
+		and CurrentState == STATE_CHASE_ATTACK
+		and AttackTargetHit == 0
+		and UsesSlepeCurrentTargetSkillRule(id)
+		and WasAttacked(id) == false
+end
+
 function HandlePostSkillPrimaryTarget(target, ignoreTarget)
 	if ignoreTarget == true then
 		IgnorePrimarySkillTarget(target)
@@ -1475,6 +1829,10 @@ function HandlePostSkillPrimaryTarget(target, ignoreTarget)
 end
 
 function ShouldPauseAfterPrimarySkillAttempt(castTarget)
+	if IsVanilmirth(MyID) == false then
+		return false
+	end
+
 	return castTarget ~= 0
 		and castTarget == AttackTarget
 		and CurrentState == STATE_CHASE_ATTACK
@@ -1489,6 +1847,14 @@ function ShouldIgnoreAfterPrimarySkillAttempt(castTarget)
 end
 
 function HandleStuckTargetReset(target)
+	if ShouldKeepCurrentTargetThroughRecovery(target) then
+		IgnoreTargetUntil[target] = nil
+		ResetPathingProbe()
+		NextChaseRepathAt = 0
+		CurrentState = STATE_CHASE_ATTACK
+		return
+	end
+
 	if target ~= 0 then
 		IgnoreTargetForDuration(target, UNREACHABLE_TARGET_IGNORE_MS)
 	end
@@ -1502,9 +1868,184 @@ function RememberActorPosition(id)
 
 	local x, y = GetV(V_POSITION, id)
 	if x ~= -1 and y ~= -1 then
+		local lastX = LastSeenPosX[id]
+		local lastY = LastSeenPosY[id]
+		if Breadcrumb1X[id] == nil then
+			Breadcrumb1X[id] = x
+			Breadcrumb1Y[id] = y
+		elseif lastX ~= nil
+			and lastY ~= nil
+			and (x ~= lastX or y ~= lastY)
+			and Distance(x, y, Breadcrumb1X[id], Breadcrumb1Y[id]) >= SIGHT_BREADCRUMB_DISTANCE then
+			Breadcrumb3X[id] = Breadcrumb2X[id]
+			Breadcrumb3Y[id] = Breadcrumb2Y[id]
+			Breadcrumb2X[id] = Breadcrumb1X[id]
+			Breadcrumb2Y[id] = Breadcrumb1Y[id]
+			Breadcrumb1X[id] = x
+			Breadcrumb1Y[id] = y
+		end
+
 		LastSeenPosX[id] = x
 		LastSeenPosY[id] = y
 	end
+end
+
+function GetActorBacktrackPosition(id, minDistanceFromMe)
+	if id == 0 then
+		return -1, -1
+	end
+
+	local myX, myY = GetV(V_POSITION, MyID)
+	local minimum = minDistanceFromMe or 0
+	local candidates = {
+		{ Breadcrumb3X[id], Breadcrumb3Y[id] },
+		{ Breadcrumb2X[id], Breadcrumb2Y[id] },
+		{ Breadcrumb1X[id], Breadcrumb1Y[id] },
+		{ LastSeenPosX[id], LastSeenPosY[id] }
+	}
+
+	for _, candidate in ipairs(candidates) do
+		local x, y = candidate[1], candidate[2]
+		if x ~= nil and y ~= nil then
+			if minimum <= 0
+				or myX == -1
+				or myY == -1
+				or Distance(myX, myY, x, y) >= minimum then
+				return x, y
+			end
+		end
+	end
+
+	return -1, -1
+end
+
+function GetKnownActorPosition(id)
+	if id == 0 then
+		return -1, -1
+	end
+
+	local x, y = GetV(V_POSITION, id)
+	if x ~= -1 and y ~= -1 then
+		return x, y
+	end
+
+	x = LastSeenPosX[id]
+	y = LastSeenPosY[id]
+	if x ~= nil and y ~= nil then
+		return x, y
+	end
+
+	return -1, -1
+end
+
+function GetKnownOwnerPosition()
+	return GetKnownActorPosition(GetV(V_OWNER, MyID))
+end
+
+function GetRecoveryCellToward(targetX, targetY, stepDistance)
+	local myX, myY = GetV(V_POSITION, MyID)
+	if myX == -1 or myY == -1 or targetX == -1 or targetY == -1 then
+		return -1, -1
+	end
+
+	local deltaX = targetX - myX
+	local deltaY = targetY - myY
+	local stepX = Sign(deltaX)
+	local stepY = Sign(deltaY)
+	local maxDistance = math.max(math.abs(deltaX), math.abs(deltaY))
+	local step = math.min(stepDistance or SIGHT_RECOVERY_STEP_CELLS, maxDistance)
+	if step < 1 then
+		step = 1
+	end
+
+	local baseX = myX + (stepX * step)
+	local baseY = myY + (stepY * step)
+	local sideX = stepY
+	local sideY = -stepX
+	local candidates = {
+		{ baseX, baseY },
+		{ baseX + sideX, baseY + sideY },
+		{ baseX - sideX, baseY - sideY },
+		{ myX + stepX, myY + stepY },
+		{ targetX, targetY }
+	}
+
+	for _, candidate in ipairs(candidates) do
+		local candidateX, candidateY = ClampMoveDestination(candidate[1], candidate[2])
+		if candidateX ~= -1 and candidateY ~= -1 and (candidateX ~= myX or candidateY ~= myY) then
+			return candidateX, candidateY
+		end
+	end
+
+	return -1, -1
+end
+
+function GetSightSearchCell()
+	local myX, myY = GetV(V_POSITION, MyID)
+	if myX == -1 or myY == -1 then
+		return -1, -1
+	end
+
+	local offsets = {
+		{ 1, 0 }, { 1, 1 }, { 0, 1 }, { -1, 1 },
+		{ -1, 0 }, { -1, -1 }, { 0, -1 }, { 1, -1 }
+	}
+	local offset = offsets[((SightRecoveryStep - 1) % 8) + 1]
+	SightRecoveryStep = (SightRecoveryStep % 8) + 1
+	return ClampMoveDestination(myX + (offset[1] * 3), myY + (offset[2] * 3))
+end
+
+function TryRecoverVisibilityToward(targetX, targetY, preferBacktrack)
+	if GetTick() < NextSightRecoveryAt and GetV(V_MOTION, MyID) == MOTION_MOVE then
+		return true
+	end
+
+	local moveX, moveY = -1, -1
+	if preferBacktrack == true then
+		moveX, moveY = GetActorBacktrackPosition(MyID, SIGHT_BACKTRACK_MIN_DISTANCE)
+	end
+
+	if moveX == -1 or moveY == -1 then
+		moveX, moveY = GetRecoveryCellToward(targetX, targetY, SIGHT_RECOVERY_STEP_CELLS)
+	end
+	if moveX == -1 or moveY == -1 then
+		moveX, moveY = GetSightSearchCell()
+	end
+
+	if moveX == -1 or moveY == -1 then
+		return false
+	end
+
+	ForceMoveTo(moveX, moveY)
+	NextSightRecoveryAt = GetTick() + SIGHT_RECOVERY_REISSUE_MS
+	CurrentState = STATE_FOLLOW
+	return true
+end
+
+function TryRecoverLostTargetSight(target)
+	local backtrackX, backtrackY = GetActorBacktrackPosition(MyID, SIGHT_BACKTRACK_MIN_DISTANCE)
+	if backtrackX ~= -1 and backtrackY ~= -1 and TryRecoverVisibilityToward(backtrackX, backtrackY, false) then
+		return true
+	end
+
+	local targetX, targetY = GetActorBacktrackPosition(target, 0)
+	if targetX ~= -1 and targetY ~= -1 and TryRecoverVisibilityToward(targetX, targetY, false) then
+		return true
+	end
+
+	targetX, targetY = GetKnownActorPosition(target)
+	if targetX ~= -1 and targetY ~= -1 and TryRecoverVisibilityToward(targetX, targetY, false) then
+		return true
+	end
+
+	local owner = GetV(V_OWNER, MyID)
+	local ownerX, ownerY = GetActorBacktrackPosition(owner, 0)
+	if ownerX ~= -1 and ownerY ~= -1 and TryRecoverVisibilityToward(ownerX, ownerY, false) then
+		return true
+	end
+
+	ownerX, ownerY = GetKnownOwnerPosition()
+	return TryRecoverVisibilityToward(ownerX, ownerY, false)
 end
 
 function GetMoveLeadPosition(id)
@@ -1650,9 +2191,9 @@ end
 
 function GetPreferredOwnerStandbyCell()
 	local owner = GetV(V_OWNER, MyID)
-	local ownerX, ownerY = GetV(V_POSITION, owner)
+	local ownerX, ownerY = GetKnownActorPosition(owner)
 	if ownerX == -1 or ownerY == -1 then
-		return ownerX, ownerY
+		return GetSightSearchCell()
 	end
 
 	local preferred = {
@@ -1678,8 +2219,7 @@ function GetPreferredOwnerStandbyCell()
 end
 
 function IsInOwnerLeashSquare(x, y)
-	local owner = GetV(V_OWNER, MyID)
-	local ownerX, ownerY = GetV(V_POSITION, owner)
+	local ownerX, ownerY = GetKnownOwnerPosition()
 	if ownerX == -1 or ownerY == -1 then
 		return false
 	end
@@ -1695,10 +2235,10 @@ end
 
 function GetOwnerRecoveryCell(stepDistance)
 	local owner = GetV(V_OWNER, MyID)
-	local ownerX, ownerY = GetV(V_POSITION, owner)
+	local ownerX, ownerY = GetKnownActorPosition(owner)
 	local myX, myY = GetV(V_POSITION, MyID)
 	if ownerX == -1 or ownerY == -1 or myX == -1 or myY == -1 then
-		return GetStandbyCell()
+		return GetSightSearchCell()
 	end
 
 	local deltaX = ownerX - myX
@@ -1844,6 +2384,10 @@ function TryCastFilirSupportSkill(skillName, skillID)
 		return 0
 	end
 
+	if HasPendingFilirSupport() then
+		return 0
+	end
+
 	local level = GetFilirSupportLevel(skillName)
 	if level < 1 then
 		return 0
@@ -1869,23 +2413,38 @@ function TryCastFilirSupportSkill(skillName, skillID)
 		return 0
 	end
 
+	local spBefore = GetV(V_SP, MyID)
 	SkillObject(MyID, level, skillID, MyID)
-	local readyAt = GetTick() + GetFilirSupportDelayMs(skillName, level)
-	if skillName == "Flitting" then
-		NextFlittingAt = readyAt
-	else
-		NextAcceleratedFlightAt = readyAt
-	end
+
+	PendingFilirSupportAt = GetTick()
+	PendingFilirSupportSP = spBefore
+	PendingFilirSupportName = skillName
+	PendingFilirSupportCost = spCost
+	PendingFilirSupportDelayMs = GetFilirSupportDelayMs(skillName, level)
 	return MyID
 end
 
 function TryCastFilirSupportSkills()
-	local supportTarget = TryCastFilirSupportSkill("Flitting", FLITTING_SKILL)
+	local supportTarget = TryCastFilirSupportSkill("AcceleratedFlight", ACCELERATED_FLIGHT_SKILL)
 	if supportTarget ~= 0 then
 		return supportTarget
 	end
 
-	return TryCastFilirSupportSkill("AcceleratedFlight", ACCELERATED_FLIGHT_SKILL)
+	return TryCastFilirSupportSkill("Flitting", FLITTING_SKILL)
+end
+
+function HandleFilirBuffPriority()
+	if HasPendingFilirSupport() then
+		return false
+	end
+
+	local supportTarget = TryCastFilirSupportSkills()
+	if supportTarget == 0 then
+		return false
+	end
+
+	CancelSoftStandbyReset()
+	return true
 end
 
 function AutoSkillReady()
@@ -1903,6 +2462,19 @@ end
 
 function SkillReady()
 	return AutoSkillReady()
+end
+
+function OffensiveSkillInRange(target, skillID, level)
+	if target == 0 or skillID == 0 then
+		return false
+	end
+
+	if IsFilir(MyID) and skillID == MOONLIGHT_SKILL then
+		local distance = DistanceToActor(MyID, target)
+		return distance == 1
+	end
+
+	return InSkillRange(MyID, target, skillID, level)
 end
 
 function ClearManualCapriceTarget()
@@ -1979,7 +2551,7 @@ function HandleManualCapricePriority()
 		return true
 	end
 
-	if InSkillRange(MyID, manualTarget, GetOffensiveSkillID(), GetManualCapriceLevel(manualTarget)) then
+	if OffensiveSkillInRange(manualTarget, GetOffensiveSkillID(), GetManualCapriceLevel(manualTarget)) then
 		return true
 	end
 
@@ -1995,15 +2567,6 @@ end
 
 function UpdateCapriceAttemptState()
 	if PendingCapriceAt == 0 then
-		return
-	end
-
-	if HasEnoughSPForCaprice() == false then
-		PendingCapriceAt = 0
-		PendingCapriceSP = 0
-		PendingCapriceTarget = 0
-		PendingCapriceCost = 0
-		PendingCapriceDelayMs = 0
 		return
 	end
 
@@ -2190,8 +2753,11 @@ function GetStandbyCell()
 		return GetPreferredOwnerStandbyCell()
 	end
 
-	local owner = GetV(V_OWNER, MyID)
-	local ownerX, ownerY = GetV(V_POSITION, owner)
+	local ownerX, ownerY = GetKnownOwnerPosition()
+	if ownerX == -1 or ownerY == -1 then
+		return GetSightSearchCell()
+	end
+
 	return ownerX, ownerY
 end
 
@@ -2200,8 +2766,7 @@ function GetPatrolCenter()
 		return AnchorX, AnchorY
 	end
 
-	local owner = GetV(V_OWNER, MyID)
-	return GetV(V_POSITION, owner)
+	return GetKnownOwnerPosition()
 end
 
 function GetPatrolPoint(step)
@@ -2284,12 +2849,24 @@ end
 
 function StartFollow(forceRecovery)
 	MoveX, MoveY = GetFollowDestination(forceRecovery == true or forceRecovery == 1)
+	if MoveX == -1 or MoveY == -1 then
+		MoveX, MoveY = GetSightSearchCell()
+	end
+	if MoveX == -1 or MoveY == -1 then
+		return
+	end
 	MoveSmart(MoveX, MoveY)
 	CurrentState = STATE_FOLLOW
 end
 
 function ForceFollow(forceRecovery)
 	MoveX, MoveY = GetFollowDestination(forceRecovery == true or forceRecovery == 1)
+	if MoveX == -1 or MoveY == -1 then
+		MoveX, MoveY = GetSightSearchCell()
+	end
+	if MoveX == -1 or MoveY == -1 then
+		return
+	end
 	ForceMoveTo(MoveX, MoveY)
 	CurrentState = STATE_FOLLOW
 end
@@ -2525,6 +3102,18 @@ function OwnerMovementOverrideActive()
 
 	OwnerMoveSince = 0
 
+	if AttackTarget ~= 0
+		and IsValidAttackTargetForCurrentPurpose(AttackTarget)
+		and (CurrentState == STATE_ATTACK or CurrentState == STATE_CHASE_ATTACK or IsInAttackMotion(MyID)) then
+		OwnerStandSince = 0
+		return false
+	end
+
+	if HasActiveSnipeWork() then
+		OwnerStandSince = 0
+		return false
+	end
+
 	if OwnerStandSince == 0 then
 		OwnerStandSince = GetTick()
 	end
@@ -2599,6 +3188,7 @@ function StartAttackChase(target)
 	CancelPostSkillWait()
 	AttackTarget = target
 	AttackTargetHit = 0
+	StartPathingProbe(target)
 	NextChaseRepathAt = 0
 	NextAttackCommandAt = 0
 	NextAttackRefreshMoveAt = 0
@@ -2651,7 +3241,40 @@ function FindMonsterInSkillRange(excludedTarget)
 			and TargetAllowsSkill(actor)
 			and IsKSTarget(actor) == false
 			and IsTargetInActiveRange(actor)
-			and InSkillRange(MyID, actor, skillID, GetTargetSkillLevel(actor)) then
+			and OffensiveSkillInRange(actor, skillID, GetTargetSkillLevel(actor)) then
+			local priority = GetSkillBehaviorPriority(actor)
+			if priority >= 0 then
+				local distance = DistanceToActor(MyID, actor)
+				if distance ~= -1 and (priority > bestPriority or (priority == bestPriority and distance < bestDistance)) then
+					bestTarget = actor
+					bestPriority = priority
+					bestDistance = distance
+				end
+			end
+		end
+	end
+
+	return bestTarget
+end
+
+function FindSnipeMonsterInSkillRange(excludedTarget)
+	local actors = GetActors()
+	local bestTarget = 0
+	local bestDistance = 999
+	local bestPriority = -1
+	local skillID = GetOffensiveSkillID()
+
+	for _, actor in ipairs(actors) do
+		if actor ~= GetV(V_OWNER, MyID)
+			and actor ~= MyID
+			and actor ~= excludedTarget
+			and IsValidTarget(actor)
+			and IsIgnoredTarget(actor) == false
+			and TargetAllowsSkill(actor)
+			and IsKSTarget(actor) == false
+			and TargetUsesSnipeBehavior(actor)
+			and IsTargetInActiveRange(actor)
+			and OffensiveSkillInRange(actor, skillID, GetTargetSkillLevel(actor)) then
 			local priority = GetSkillBehaviorPriority(actor)
 			if priority >= 0 then
 				local distance = DistanceToActor(MyID, actor)
@@ -2699,6 +3322,125 @@ function FindMonsterForSnipe(excludedTarget, taggedOnly)
 	return bestTarget
 end
 
+function HasSnipeTargetInView(taggedOnly)
+	local pendingTarget = GetPendingCapriceRetryTarget()
+	if pendingTarget ~= 0 and (taggedOnly == false or TargetUsesSnipeBehavior(pendingTarget)) then
+		return true
+	end
+
+	if taggedOnly == false and FindMonsterInSkillRange(0) ~= 0 then
+		return true
+	end
+
+	return FindMonsterForSnipe(0, taggedOnly) ~= 0
+end
+
+function HasActiveSnipeWork()
+	local snipeTarget = FindMonsterForSnipe(0, true)
+	return SkillTargetCanPreemptAttackWork(snipeTarget)
+end
+
+function IsValidSnipeSkillTarget(target, skillID)
+	return target ~= 0
+		and IsValidTarget(target)
+		and IsIgnoredTarget(target) == false
+		and IsKSTarget(target) == false
+		and TargetUsesSnipeBehavior(target)
+		and IsTargetInActiveRange(target)
+		and TargetAllowsSkill(target)
+		and OffensiveSkillInRange(target, skillID, GetTargetSkillLevel(target))
+end
+
+function SkillTargetBeats(candidate, current)
+	if candidate == 0 then
+		return false
+	end
+
+	if current == 0 then
+		return true
+	end
+
+	local candidatePriority = GetSkillBehaviorPriority(candidate)
+	local currentPriority = GetSkillBehaviorPriority(current)
+	if candidatePriority > currentPriority then
+		return true
+	elseif candidatePriority < currentPriority then
+		return false
+	end
+
+	local candidateDistance = DistanceToActor(MyID, candidate)
+	local currentDistance = DistanceToActor(MyID, current)
+	return candidateDistance ~= -1 and (currentDistance == -1 or candidateDistance < currentDistance)
+end
+
+function SnipeTargetBeats(candidate, current)
+	return SkillTargetBeats(candidate, current)
+end
+
+function SkillTargetCanPreemptAttackWork(skillTarget)
+	if skillTarget == 0 then
+		return false
+	end
+
+	local skillPriority = GetSkillBehaviorPriority(skillTarget)
+	if skillPriority < 0 then
+		return false
+	end
+
+	local attackTarget = FindMonsterTarget(0)
+	if attackTarget == 0 or attackTarget == skillTarget then
+		return true
+	end
+
+	local attackPriority = GetAttackBehaviorPriority(attackTarget)
+	if attackPriority < 0 then
+		return true
+	end
+
+	if skillPriority > attackPriority then
+		return true
+	elseif skillPriority < attackPriority then
+		return false
+	end
+
+	local skillDistance = DistanceToActor(MyID, skillTarget)
+	local attackDistance = DistanceToActor(MyID, attackTarget)
+	return skillDistance ~= -1 and (attackDistance == -1 or skillDistance <= attackDistance)
+end
+
+function IssueOffensiveSkillOnTarget(skillTarget, skillLevel)
+	local skillID = GetOffensiveSkillID()
+	if skillTarget == 0 or skillID == 0 then
+		return 0
+	end
+
+	local skillCost = GetOffensiveSkillSPCost(skillLevel)
+	if HasEnoughSPForOffensiveSkill(skillLevel) == false then
+		return 0
+	end
+
+	if OffensiveSkillInRange(skillTarget, skillID, skillLevel) == false then
+		return 0
+	end
+
+	local spBefore = GetV(V_SP, MyID)
+	SkillObject(MyID, skillLevel, skillID, skillTarget)
+	if IsFilir(MyID) then
+		NextCapriceTryAt = GetTick() + FILIR_OFFENSIVE_RETRY_MS
+	else
+		NextCapriceTryAt = GetTick() + CAPRICE_RETRY_MS
+	end
+	if PendingCapriceAt == 0 or PendingCapriceTarget ~= skillTarget then
+		PendingCapriceAt = GetTick()
+		PendingCapriceSP = spBefore
+		PendingCapriceTarget = skillTarget
+		PendingCapriceCost = skillCost
+		PendingCapriceDelayMs = GetOffensiveSkillDelayMs(skillLevel)
+	end
+
+	return skillTarget
+end
+
 function TryCastCaprice()
 	local manualTarget = GetManualCapriceTarget()
 	local skillID = GetOffensiveSkillID()
@@ -2710,7 +3452,7 @@ function TryCastCaprice()
 		if ManualSkillReady() == false then
 			return 0
 		end
-	elseif HasEnoughSPForCaprice() == false or not SkillReady() then
+	elseif not SkillReady() then
 		return 0
 	end
 
@@ -2726,27 +3468,53 @@ function TryCastCaprice()
 
 	local skillTarget = 0
 	if manualTarget ~= 0 then
-		if InSkillRange(MyID, manualTarget, skillID, GetManualCapriceLevel(manualTarget)) == false then
+		if OffensiveSkillInRange(manualTarget, skillID, GetManualCapriceLevel(manualTarget)) == false then
 			return 0
 		end
 		skillTarget = manualTarget
-	elseif AttackTarget ~= 0
-		and excludedTarget ~= AttackTarget
-		and PrefersCurrentTargetForSkill(AttackTarget)
-		and IsValidTarget(AttackTarget)
-		and IsIgnoredTarget(AttackTarget) == false
-		and IsKSTarget(AttackTarget) == false
-		and IsTargetInActiveRange(AttackTarget)
-		and TargetUsesAvoidBehavior(AttackTarget) == false
-		and TargetAllowsSkill(AttackTarget)
-		and InSkillRange(MyID, AttackTarget, skillID, GetTargetSkillLevel(AttackTarget)) then
-		skillTarget = AttackTarget
-	elseif PendingCapriceAt ~= 0 and PendingCapriceTarget ~= excludedTarget and IsValidTarget(PendingCapriceTarget) and IsIgnoredTarget(PendingCapriceTarget) == false and IsKSTarget(PendingCapriceTarget) == false
-		and IsTargetInActiveRange(PendingCapriceTarget)
-		and TargetAllowsSkill(PendingCapriceTarget)
-		and InSkillRange(MyID, PendingCapriceTarget, skillID, GetTargetSkillLevel(PendingCapriceTarget)) then
-		skillTarget = PendingCapriceTarget
-	else
+	end
+
+	if manualTarget == 0 then
+		local sideTarget = FindMonsterInSkillRange(excludedTarget)
+		if SkillTargetBeats(sideTarget, skillTarget) then
+			skillTarget = sideTarget
+		end
+
+		local currentTarget = 0
+		if AttackTarget ~= 0
+			and IsValidTarget(AttackTarget)
+			and IsIgnoredTarget(AttackTarget) == false
+			and IsKSTarget(AttackTarget) == false
+			and IsTargetInActiveRange(AttackTarget)
+			and TargetUsesAvoidBehavior(AttackTarget) == false
+			and OffensiveSkillInRange(AttackTarget, skillID, GetTargetSkillLevel(AttackTarget)) then
+			if ShouldUseSlepeChaseOpenerSkill(AttackTarget) and TargetAllowsSkill(AttackTarget) then
+				currentTarget = AttackTarget
+			elseif IsFilir(MyID) and TargetAllowsSkill(AttackTarget, UsesSlepeCurrentTargetSkillRule(AttackTarget) == false) then
+				currentTarget = AttackTarget
+			elseif excludedTarget ~= AttackTarget and PrefersCurrentTargetForSkill(AttackTarget) and TargetAllowsSkill(AttackTarget) then
+				currentTarget = AttackTarget
+			elseif excludedTarget == AttackTarget and AllowsSlepeCurrentTargetFallbackSkill(AttackTarget) and TargetAllowsSlepeCurrentTargetFallbackSkill(AttackTarget) then
+				currentTarget = AttackTarget
+			end
+		end
+		if SkillTargetBeats(currentTarget, skillTarget) then
+			skillTarget = currentTarget
+		end
+
+		local pendingTarget = 0
+		if PendingCapriceAt ~= 0 and PendingCapriceTarget ~= excludedTarget and IsValidTarget(PendingCapriceTarget) and IsIgnoredTarget(PendingCapriceTarget) == false and IsKSTarget(PendingCapriceTarget) == false
+			and IsTargetInActiveRange(PendingCapriceTarget)
+			and TargetAllowsSkill(PendingCapriceTarget)
+			and OffensiveSkillInRange(PendingCapriceTarget, skillID, GetTargetSkillLevel(PendingCapriceTarget)) then
+			pendingTarget = PendingCapriceTarget
+		end
+		if SkillTargetBeats(pendingTarget, skillTarget) then
+			skillTarget = pendingTarget
+		end
+	end
+
+	if skillTarget == 0 then
 		skillTarget = FindMonsterInSkillRange(excludedTarget)
 		if skillTarget == 0
 			and excludedTarget == AttackTarget
@@ -2758,7 +3526,7 @@ function TryCastCaprice()
 			and IsTargetInActiveRange(AttackTarget)
 			and TargetUsesAvoidBehavior(AttackTarget) == false
 			and TargetAllowsSlepeCurrentTargetFallbackSkill(AttackTarget)
-			and InSkillRange(MyID, AttackTarget, skillID, GetTargetSkillLevel(AttackTarget)) then
+			and OffensiveSkillInRange(AttackTarget, skillID, GetTargetSkillLevel(AttackTarget)) then
 			skillTarget = AttackTarget
 		elseif skillTarget == 0 and excludedTarget == 0 then
 			skillTarget = FindMonsterInSkillRange(0)
@@ -2769,26 +3537,42 @@ function TryCastCaprice()
 		return 0
 	end
 
+	if manualTarget == 0 and SkillTargetCanPreemptAttackWork(skillTarget) == false then
+		return 0
+	end
+
 	local skillLevel = GetTargetSkillLevel(skillTarget)
 	if manualTarget ~= 0 and skillTarget == manualTarget then
 		skillLevel = GetManualCapriceLevel(skillTarget)
 	end
-	local skillCost = GetOffensiveSkillSPCost(skillLevel)
-	if HasEnoughSPForOffensiveSkill(skillLevel) == false then
+
+	return IssueOffensiveSkillOnTarget(skillTarget, skillLevel)
+end
+
+function TryCastSnipeSkill()
+	local skillID = GetOffensiveSkillID()
+	if skillID == 0 then
 		return 0
 	end
 
-	local spBefore = GetV(V_SP, MyID)
-	SkillObject(MyID, skillLevel, skillID, skillTarget)
-	NextCapriceTryAt = GetTick() + CAPRICE_RETRY_MS
-	if PendingCapriceAt == 0 or PendingCapriceTarget ~= skillTarget then
-		PendingCapriceAt = GetTick()
-		PendingCapriceSP = spBefore
-		PendingCapriceTarget = skillTarget
-		PendingCapriceCost = skillCost
-		PendingCapriceDelayMs = GetOffensiveSkillDelayMs(skillLevel)
+	if not SkillReady() then
+		return 0
 	end
-	return skillTarget
+
+	if FindOwnerAggroTarget(0) ~= 0 then
+		return 0
+	end
+
+	local skillTarget = FindMonsterForSnipe(0, true)
+	if skillTarget == 0 or IsValidSnipeSkillTarget(skillTarget, skillID) == false then
+		return 0
+	end
+
+	if SkillTargetCanPreemptAttackWork(skillTarget) == false then
+		return 0
+	end
+
+	return IssueOffensiveSkillOnTarget(skillTarget, GetTargetSkillLevel(skillTarget))
 end
 
 function TryCastConfiguredSkills()
@@ -2809,8 +3593,27 @@ function TryCastConfiguredSkills()
 	return TryCastCaprice()
 end
 
+function TryCastFilirContactMoonlight()
+	if IsFilir(MyID) == false then
+		return 0
+	end
+
+	local castTarget = TryCastCaprice()
+	if castTarget == 0 then
+		return 0
+	end
+
+	ResetPathingProbe()
+	CurrentState = STATE_ATTACK
+	return 1
+end
+
 function AcquireAttackTarget(excludedTarget)
 	if IsValidAttackTargetForCurrentPurpose(AttackTarget) then
+		if TryPreemptLowPriorityAttackTarget() then
+			return
+		end
+
 		return
 	end
 
@@ -2827,6 +3630,53 @@ function AcquireAttackTarget(excludedTarget)
 	end
 
 	ClearAttackTarget()
+end
+
+function TryPreemptLowPriorityAttackTarget()
+	if AttackTarget == 0 or IsOwnerProtectionAttackTarget(AttackTarget) then
+		return false
+	end
+
+	if CurrentState == STATE_ATTACK
+		or AttackTargetHit == 1
+		or IsInAttackMotion(MyID)
+		or PendingCapriceTarget == AttackTarget then
+		return false
+	end
+
+	local currentTier = GetAttackBehaviorTier(AttackTarget)
+	if currentTier < 1 then
+		return false
+	end
+
+	local betterTarget = FindMonsterTarget(AttackTarget)
+	if betterTarget == 0 then
+		return false
+	end
+
+	local betterTier = GetAttackBehaviorTier(betterTarget)
+	if betterTier < currentTier then
+		return false
+	end
+
+	if betterTier == currentTier then
+		local currentPriority = GetAttackBehaviorPriority(AttackTarget)
+		local betterPriority = GetAttackBehaviorPriority(betterTarget)
+		if betterPriority < currentPriority then
+			return false
+		end
+
+		if betterPriority == currentPriority then
+			local currentDistance = DistanceToActor(MyID, AttackTarget)
+			local betterDistance = DistanceToActor(MyID, betterTarget)
+			if currentDistance ~= -1 and (betterDistance == -1 or betterDistance >= currentDistance) then
+				return false
+			end
+		end
+	end
+
+	StartAttackChase(betterTarget)
+	return true
 end
 
 function UpdateAttackChaseMovement()
@@ -2847,8 +3697,14 @@ function UpdateAttackChaseMovement()
 		return
 	end
 
+	if TryCastFilirContactMoonlight() == 1 then
+		return
+	end
+
 	local repathMs = CHASE_REPATH_MS
-	if GetV(V_MOTION, AttackTarget) == MOTION_MOVE then
+	if IsFilir(MyID) then
+		repathMs = FILIR_CHASE_REPATH_MS
+	elseif GetV(V_MOTION, AttackTarget) == MOTION_MOVE then
 		repathMs = 150
 	end
 
@@ -2856,7 +3712,9 @@ function UpdateAttackChaseMovement()
 	if GetV(V_MOTION, MyID) ~= MOTION_MOVE then
 		shouldRepath = true
 	elseif GetTick() >= NextChaseRepathAt then
-		if Distance(MoveX, MoveY, nextX, nextY) >= CHASE_REPATH_DISTANCE then
+		if IsFilir(MyID) then
+			shouldRepath = MoveX ~= nextX or MoveY ~= nextY
+		elseif Distance(MoveX, MoveY, nextX, nextY) >= CHASE_REPATH_DISTANCE then
 			shouldRepath = true
 		end
 	end
@@ -2888,7 +3746,11 @@ function ForceAttackChaseMovement()
 	end
 
 	ForceMoveTo(nextX, nextY)
-	NextChaseRepathAt = GetTick() + 150
+	if IsFilir(MyID) then
+		NextChaseRepathAt = GetTick() + FILIR_CHASE_REPATH_MS
+	else
+		NextChaseRepathAt = GetTick() + 150
+	end
 end
 
 function RawAttackRange()
@@ -2913,11 +3775,11 @@ function StickyAttackRange()
 end
 
 function TryStickyAttackCommand()
-	if IsSnipeMode() then
+	if AttackTarget == 0 then
 		return 0
 	end
 
-	if AttackTarget == 0 then
+	if TargetUsesSnipeBehavior(AttackTarget) then
 		return 0
 	end
 
@@ -2930,7 +3792,7 @@ function TryStickyAttackCommand()
 		return 0
 	end
 
-	if distance > AttackRange() and IsTargetActuallyMoving(AttackTarget) == false then
+	if IsFilir(MyID) == false and distance > AttackRange() and IsTargetActuallyMoving(AttackTarget) == false then
 		return 0
 	end
 
@@ -2939,6 +3801,35 @@ function TryStickyAttackCommand()
 	if distance <= AttackRange() then
 		AttackTargetHit = 1
 		HandlePostNormalAttack(AttackTarget)
+	end
+	return 1
+end
+
+function TryFilirAttackFallback()
+	if IsFilir(MyID) == false or AttackTarget == 0 then
+		return 0
+	end
+
+	if TargetUsesSnipeBehavior(AttackTarget) then
+		return 0
+	end
+
+	if GetTick() + ATTACK_LATCH_GRACE_MS < NextAttackCommandAt then
+		return 0
+	end
+
+	local distance = DistanceToActor(MyID, AttackTarget)
+	if distance == -1 or distance > AttackRange() then
+		return 0
+	end
+
+	ResetPathingProbe()
+	Attack(MyID, AttackTarget)
+	NextAttackCommandAt = GetTick() + ATTACK_REISSUE_MS
+	AttackTargetHit = 1
+	HandlePostNormalAttack(AttackTarget)
+	if AttackTarget ~= 0 then
+		CurrentState = STATE_ATTACK
 	end
 	return 1
 end
@@ -3170,6 +4061,10 @@ function GetAttackApproachCell(target)
 		return myX, myY
 	end
 
+	if IsFilir(MyID) then
+		return GetFilirAttackApproachCell(target)
+	end
+
 	if IsTargetActuallyMoving(target) then
 		targetX, targetY = GetMoveLeadPosition(target)
 	end
@@ -3195,7 +4090,76 @@ function GetAttackApproachCell(target)
 	return ResolveAttackCell(target, targetX - (stepX * attackRange), targetY - (stepY * attackRange))
 end
 
+function GetFilirAttackApproachCell(target)
+	local myX, myY = GetV(V_POSITION, MyID)
+	local targetX, targetY = GetV(V_POSITION, target)
+	if myX == -1 or targetX == -1 then
+		return myX, myY
+	end
+
+	if IsStackedOnTarget(target) == false and DistanceToActor(MyID, target) ~= -1 and DistanceToActor(MyID, target) <= AttackRange() then
+		return myX, myY
+	end
+
+	if IsTargetActuallyMoving(target) == false then
+		local passX, passY = GetFilirStationaryPassThroughCell(target)
+		if passX ~= -1 and passY ~= -1 then
+			return passX, passY
+		end
+	end
+
+	local nearX, nearY = GetNearbyStationaryCell(target)
+	if nearX ~= -1 and nearY ~= -1 then
+		return nearX, nearY
+	end
+
+	local altX, altY = GetAlternateOpenAdjacentCell(target)
+	if altX ~= -1 and altY ~= -1 then
+		return altX, altY
+	end
+
+	return ResolveAttackCell(target, targetX - Sign(targetX - myX), targetY - Sign(targetY - myY))
+end
+
+function GetFilirStationaryPassThroughCell(target)
+	local myX, myY = GetV(V_POSITION, MyID)
+	local targetX, targetY = GetV(V_POSITION, target)
+	if myX == -1 or targetX == -1 then
+		return -1, -1
+	end
+
+	local stepX = Sign(targetX - myX)
+	local stepY = Sign(targetY - myY)
+	if stepX == 0 and stepY == 0 then
+		return -1, -1
+	end
+
+	local candidates = {
+		{ targetX + stepX, targetY + stepY },
+		{ targetX + stepX, targetY },
+		{ targetX, targetY + stepY },
+		{ targetX + stepX, targetY - stepY },
+		{ targetX - stepX, targetY + stepY }
+	}
+
+	for _, candidate in ipairs(candidates) do
+		local candidateX = candidate[1]
+		local candidateY = candidate[2]
+		if (candidateX ~= targetX or candidateY ~= targetY)
+			and IsOwnerCell(candidateX, candidateY) == false
+			and IsCellOccupiedByOther(candidateX, candidateY, target) == false then
+			return candidateX, candidateY
+		end
+	end
+
+	return -1, -1
+end
+
 function GetSkillApproachCell(target)
+	if IsFilir(MyID) then
+		return GetAttackApproachCell(target)
+	end
+
 	local level = GetTargetSkillLevel(target)
 	local nextX, nextY = SkillApproachPosition(target, GetOffensiveSkillID(), level)
 	if nextX == nil or nextY == nil or nextX == -1 or nextY == -1 then
@@ -3250,12 +4214,20 @@ function GetSnipeOrbitCell(target)
 end
 
 function TryApproachSnipeTarget(taggedOnly)
-	if FindMonsterInSkillRange(0) ~= 0 then
+	if taggedOnly == false and FindMonsterInSkillRange(0) ~= 0 then
 		return false
 	end
 
 	local snipeTarget = FindMonsterForSnipe(0, taggedOnly)
 	if snipeTarget == 0 then
+		return false
+	end
+
+	if SkillTargetCanPreemptAttackWork(snipeTarget) == false then
+		return false
+	end
+
+	if CheckTargetPathingFailure(snipeTarget) then
 		return false
 	end
 
@@ -3272,6 +4244,31 @@ function TryApproachSnipeTarget(taggedOnly)
 	end
 	CurrentState = STATE_FOLLOW
 	return true
+end
+
+function TryHandleSnipeBehavior(taggedOnly)
+	local castTarget = TryCastSnipeSkill()
+	if castTarget ~= 0 then
+		ResetPathingProbe()
+		ClearAttackTarget()
+		CurrentState = STATE_IDLE
+		return true
+	end
+
+	if TryMaintainSnipePendingTarget() then
+		return true
+	end
+
+	local bestSnipeTarget = FindMonsterForSnipe(0, taggedOnly)
+	if bestSnipeTarget ~= 0
+		and SkillTargetCanPreemptAttackWork(bestSnipeTarget)
+		and OffensiveSkillInRange(bestSnipeTarget, GetOffensiveSkillID(), GetTargetSkillLevel(bestSnipeTarget)) then
+		ClearAttackTarget()
+		CurrentState = STATE_IDLE
+		return true
+	end
+
+	return TryApproachSnipeTarget(taggedOnly)
 end
 
 function GetPendingCapriceRetryTarget()
@@ -3292,30 +4289,28 @@ function TryMaintainSnipePendingTarget()
 		return false
 	end
 
+	if SkillTargetCanPreemptAttackWork(pendingTarget) == false then
+		return false
+	end
+
+	local betterTarget = FindMonsterForSnipe(0, true)
+	if SnipeTargetBeats(betterTarget, pendingTarget) then
+		return false
+	end
+
+	if CheckTargetPathingFailure(pendingTarget) then
+		return false
+	end
+
 	local nextX, nextY = GetSkillApproachCell(pendingTarget)
 	if nextX == nil or nextY == nil or nextX == -1 or nextY == -1 then
 		CurrentState = STATE_IDLE
 		return true
 	end
 
-	if InSkillRange(MyID, pendingTarget, GetOffensiveSkillID(), GetTargetSkillLevel(pendingTarget)) then
-		local myX, myY = GetV(V_POSITION, MyID)
-		if myX ~= -1 and myY ~= -1 and Distance(myX, myY, nextX, nextY) <= 1 then
-			if GetTick() >= NextSnipeOrbitAt then
-				local orbitX, orbitY = GetSnipeOrbitCell(pendingTarget)
-				if orbitX ~= -1 and orbitY ~= -1 then
-					if MoveSmart(orbitX, orbitY) then
-						NextChaseRepathAt = GetTick() + CHASE_REPATH_MS
-						NextSnipeOrbitAt = GetTick() + SNIPE_ORBIT_MS
-						CurrentState = STATE_FOLLOW
-						return true
-					end
-				end
-				NextSnipeOrbitAt = GetTick() + SNIPE_ORBIT_MS
-			end
-			CurrentState = STATE_IDLE
-			return true
-		end
+	if OffensiveSkillInRange(pendingTarget, GetOffensiveSkillID(), GetTargetSkillLevel(pendingTarget)) then
+		CurrentState = STATE_IDLE
+		return true
 	end
 
 	ClearAttackTarget()
@@ -3413,7 +4408,7 @@ end
 
 function HandleAttackObjectCommand(target)
 	ClearManualCapriceTarget()
-	if IsSnipeMode() then
+	if ShouldBlockNormalAttackCommand(target) then
 		return
 	end
 
@@ -3452,7 +4447,11 @@ function HandleFollowCommand()
 end
 
 function ProcessCommand(msg)
-	if IsSnipeMode() and (msg[1] == ATTACK_OBJECT_CMD or msg[1] == ATTACK_AREA_CMD) then
+	if msg[1] == ATTACK_OBJECT_CMD and ShouldBlockNormalAttackCommand(msg[2]) then
+		return
+	end
+
+	if msg[1] == ATTACK_AREA_CMD and IsSnipeMode() then
 		return
 	end
 
@@ -3478,6 +4477,10 @@ function TickIdle()
 		return
 	end
 
+	if RequireStandbyReset == 1 and HasActiveSnipeWork() then
+		CancelSoftStandbyReset()
+	end
+
 	if SoftResetInProgress() then
 		if TryBreakSoftResetForTarget() then
 			return
@@ -3488,13 +4491,24 @@ function TickIdle()
 		return
 	end
 
-	TryCastConfiguredSkills()
-	AcquireAttackTarget()
-	if AttackTarget ~= 0 then
+	if TryHandleSnipeBehavior(true) then
 		return
 	end
 
-	if TryApproachSnipeTarget(true) then
+	if IsFilir(MyID) then
+		AcquireAttackTarget()
+		if AttackTarget ~= 0 then
+			return
+		end
+	end
+
+	if TryCastConfiguredSkills() ~= 0 then
+		CurrentState = STATE_IDLE
+		return
+	end
+
+	AcquireAttackTarget()
+	if AttackTarget ~= 0 then
 		return
 	end
 
@@ -3502,6 +4516,10 @@ function TickIdle()
 end
 
 function TickFollow()
+	if RequireStandbyReset == 1 and HasActiveSnipeWork() then
+		CancelSoftStandbyReset()
+	end
+
 	if SoftResetInProgress() then
 		if TryBreakSoftResetForTarget() then
 			return
@@ -3517,13 +4535,24 @@ function TickFollow()
 		return
 	end
 
-	TryCastConfiguredSkills()
-	AcquireAttackTarget()
-	if AttackTarget ~= 0 then
+	if TryHandleSnipeBehavior(true) then
 		return
 	end
 
-	if TryApproachSnipeTarget(true) then
+	if IsFilir(MyID) then
+		AcquireAttackTarget()
+		if AttackTarget ~= 0 then
+			return
+		end
+	end
+
+	if TryCastConfiguredSkills() ~= 0 then
+		CurrentState = STATE_IDLE
+		return
+	end
+
+	AcquireAttackTarget()
+	if AttackTarget ~= 0 then
 		return
 	end
 
@@ -3540,7 +4569,7 @@ function TickFollow()
 end
 
 function TickChaseAttack()
-	if IsSnipeMode() then
+	if AttackTarget ~= 0 and TargetUsesSnipeBehavior(AttackTarget) then
 		ClearAttackTarget()
 		ForceStandby()
 		return
@@ -3555,6 +4584,12 @@ function TickChaseAttack()
 			BeginSoftStandbyReset(0, 1)
 		end
 		return
+	end
+
+	if AttackTarget ~= 0 and IsOutOfSight(MyID, AttackTarget) then
+		if TryRecoverLostTargetSight(AttackTarget) then
+			return
+		end
 	end
 
 	if IsValidAttackTargetForCurrentPurpose(AttackTarget) == false
@@ -3583,9 +4618,21 @@ function TickChaseAttack()
 		HandlePostSkillPrimaryTarget(castTarget, ShouldIgnoreAfterPrimarySkillAttempt(castTarget))
 		return
 	end
+	if castTarget ~= 0 then
+		ResetPathingProbe()
+		if IsFilir(MyID) then
+			CurrentState = STATE_ATTACK
+			return
+		end
+	end
+
+	if TryFilirAttackFallback() == 1 then
+		return
+	end
 
 	local distance = DistanceToActor(MyID, AttackTarget)
-	if distance <= AttackRange() then
+	if IsFilir(MyID) == false and distance <= AttackRange() then
+		ResetPathingProbe()
 		Attack(MyID, AttackTarget)
 		NextAttackCommandAt = GetTick() + ATTACK_REISSUE_MS
 		AttackTargetHit = 1
@@ -3598,6 +4645,12 @@ function TickChaseAttack()
 
 	if distance <= StickyAttackRange() and TryStickyAttackCommand() == 1 then
 		CurrentState = STATE_ATTACK
+		return
+	end
+
+	if CheckTargetPathingFailure(AttackTarget) then
+		local failedTarget = AttackTarget
+		HandlePathingFailureTarget(failedTarget)
 		return
 	end
 
@@ -3633,7 +4686,7 @@ function TickChaseAttack()
 end
 
 function TickAttack()
-	if IsSnipeMode() then
+	if AttackTarget ~= 0 and TargetUsesSnipeBehavior(AttackTarget) then
 		ClearAttackTarget()
 		ForceStandby()
 		return
@@ -3648,6 +4701,12 @@ function TickAttack()
 			BeginSoftStandbyReset(0, 1)
 		end
 		return
+	end
+
+	if AttackTarget ~= 0 and IsOutOfSight(MyID, AttackTarget) then
+		if TryRecoverLostTargetSight(AttackTarget) then
+			return
+		end
 	end
 
 	if IsValidAttackTargetForCurrentPurpose(AttackTarget) == false
@@ -3676,10 +4735,27 @@ function TickAttack()
 		HandlePostSkillPrimaryTarget(castTarget, ShouldIgnoreAfterPrimarySkillAttempt(castTarget))
 		return
 	end
+	if castTarget ~= 0 then
+		ResetPathingProbe()
+		if IsFilir(MyID) then
+			CurrentState = STATE_ATTACK
+			return
+		end
+	end
+
+	if TryFilirAttackFallback() == 1 then
+		return
+	end
 
 	local distance = DistanceToActor(MyID, AttackTarget)
 	if distance > AttackRange() then
 		if distance <= StickyAttackRange() and TryStickyAttackCommand() == 1 then
+			return
+		end
+
+		if CheckTargetPathingFailure(AttackTarget) then
+			local failedTarget = AttackTarget
+			HandlePathingFailureTarget(failedTarget)
 			return
 		end
 
@@ -3703,7 +4779,8 @@ function TickAttack()
 		return
 	end
 
-	if GetTick() + ATTACK_LATCH_GRACE_MS >= NextAttackCommandAt then
+	if IsFilir(MyID) == false and GetTick() + ATTACK_LATCH_GRACE_MS >= NextAttackCommandAt then
+		ResetPathingProbe()
 		Attack(MyID, AttackTarget)
 		NextAttackCommandAt = GetTick() + ATTACK_REISSUE_MS
 		AttackTargetHit = 1
@@ -3791,6 +4868,7 @@ function TickWait()
 	end
 
 	if GetTick() < WaitModeReadyAt then
+		TryCastConfiguredSkills()
 		return
 	end
 
@@ -3806,7 +4884,11 @@ function TickWait()
 		return
 	end
 
-	TryPatrol()
+	if TryPatrol() then
+		return
+	end
+
+	EnsureIdleStandby()
 end
 
 function TickSnipeMode()
@@ -3830,6 +4912,10 @@ function TickSnipeMode()
 	if CurrentState == STATE_HOLD then
 		TickHold()
 		return
+	end
+
+	if RequireStandbyReset == 1 and HasActiveSnipeWork() then
+		CancelSoftStandbyReset()
 	end
 
 	if SoftResetInProgress() then
@@ -3966,6 +5052,12 @@ function EnsureActiveBehavior()
 		return
 	end
 
+	if HasActiveSnipeWork() then
+		CancelSoftStandbyReset()
+		StandStillSince = 0
+		return
+	end
+
 	if RequireStandbyReset == 1 then
 		if SoftResetInProgress() then
 			if StandbyResetMoveBack == 1 and GetV(V_MOTION, MyID) == MOTION_STAND then
@@ -4009,7 +5101,7 @@ function EnsureActiveBehavior()
 end
 
 function ForceImmediateActivity()
-	if CurrentState == STATE_HOLD or CurrentState == STATE_WAIT or IsSnipeMode() then
+	if CurrentState == STATE_HOLD or CurrentState == STATE_WAIT or HasActiveSnipeWork() then
 		return
 	end
 
@@ -4130,8 +5222,12 @@ end
 
 function AI(myid)
 	MyID = myid
+	LoadFilirSupportCooldowns()
+	RememberActorPosition(MyID)
+	RememberActorPosition(GetV(V_OWNER, MyID))
 	UpdateSPTracking()
 	UpdateCapriceAttemptState()
+	UpdateFilirSupportAttemptState()
 	CleanupProtectedMob()
 	CleanupKiteNoAttackDone()
 
@@ -4139,7 +5235,10 @@ function AI(myid)
 	local reserved = GetResMsg(myid)
 
 	if msg[1] == NONE_CMD then
-		if reserved[1] ~= NONE_CMD and (IsSnipeMode() == false or (reserved[1] ~= ATTACK_OBJECT_CMD and reserved[1] ~= ATTACK_AREA_CMD)) and Queue.size(PendingCommands) < 10 then
+		if reserved[1] ~= NONE_CMD
+			and (reserved[1] ~= ATTACK_OBJECT_CMD or ShouldBlockNormalAttackCommand(reserved[2]) == false)
+			and (reserved[1] ~= ATTACK_AREA_CMD or IsSnipeMode() == false)
+			and Queue.size(PendingCommands) < 10 then
 			Queue.push_right(PendingCommands, reserved)
 		end
 	else
@@ -4148,6 +5247,14 @@ function AI(myid)
 	end
 
 	if HandleManualCapricePriority() then
+		local actors = GetActors()
+		for _, actor in ipairs(actors) do
+			RememberActorPosition(actor)
+		end
+		return
+	end
+
+	if HandleFilirBuffPriority() then
 		local actors = GetActors()
 		for _, actor in ipairs(actors) do
 			RememberActorPosition(actor)
@@ -4178,16 +5285,6 @@ function AI(myid)
 		end
 		return
 	end
-
-	if IsSnipeMode() then
-		TickSnipeMode()
-		local actors = GetActors()
-		for _, actor in ipairs(actors) do
-			RememberActorPosition(actor)
-		end
-		return
-	end
-
 
 	if CurrentState == STATE_IDLE then
 		TickIdle()
