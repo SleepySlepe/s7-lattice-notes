@@ -23,12 +23,12 @@ namespace MobListEditor
         }
     }
 
-    internal sealed class TacticEntry { public string Section; public bool IsSection; public int MobID; public string MonsterName; public string Behavior; public string Skill; public int SkillLevel; }
+    internal sealed class TacticEntry { public string Section; public bool IsSection; public int MobID; public string MonsterName; public string Behavior; public string Priority; public string Skill; public int SkillLevel; }
     internal sealed class HomunculusSkillDefinition { public string Family; public string SkillKey; public string DisplayName; public int DefaultMinSPPercent; public int DefaultLevel; public HomunculusSkillDefinition(string family, string skillKey, string displayName, int defaultMinSpPercent, int defaultLevel) { Family = family; SkillKey = skillKey; DisplayName = displayName; DefaultMinSPPercent = defaultMinSpPercent; DefaultLevel = defaultLevel; } }
     internal sealed class HomunculusSkillState { public int MinSPPercent; public int Level; public int OwnerHPPercent; public int HomunHPPercent; }
     internal sealed class SkillEditorRow { public NumericUpDown MinSPPercent; public ComboBox Level; }
     internal sealed class PatrolSettings { public bool Enabled; public string Shape; public int Distance; }
-    internal sealed class RuntimeSettings { public bool DefendOwner; public bool TurretStayOnCell; public bool AntiStuckEnabled; public int AntiStuckMs; public bool FollowOwnerOnMove; public int FollowOwnerDelayMs; public int SoftResetMs; public int OwnerResumeMs; public int PostSkillWaitMs; public bool DanceAttackEnabled; public bool DanceMovingOnly; public bool DanceEveryAttack; public int DanceMoveMs; }
+    internal sealed class RuntimeSettings { public bool DefendOwner; public bool TurretStayOnCell; public bool? NoKS; public bool AntiStuckEnabled; public int AntiStuckMs; public bool FollowOwnerOnMove; public int FollowOwnerDelayMs; public int SoftResetMs; public int OwnerResumeMs; public int PostSkillWaitMs; public bool DanceAttackEnabled; public bool DanceMovingOnly; public bool DanceEveryAttack; public int DanceMoveMs; }
     internal sealed class EditorProfileSnapshot { public string Id; public string Name; public string BehaviorMode; public string TacticsMode; public List<TacticEntry> Whitelist; public List<TacticEntry> Blacklist; public Dictionary<string, HomunculusSkillState> HomunculusSkills; public PatrolSettings Patrol; public RuntimeSettings Runtime; }
     internal sealed class EditorProfileMeta { public string Id; public string Name; }
     internal sealed class EditorProfileStore { public string ActiveProfileId; public string AltTAction; public string AltTProfileId; public List<EditorProfileMeta> Profiles; }
@@ -36,15 +36,33 @@ namespace MobListEditor
     internal sealed class ProfileListItem { public string Id; public string Name; public ProfileListItem(string id, string name) { Id = id; Name = name; } public override string ToString() { return Name; } }
     internal sealed class UpdateManifest { public string Version; public string Channel; public List<UpdateFile> Files; public List<string> Preserve; public List<string> Notes; }
     internal sealed class UpdateFile { public string Path; public string Kind; }
+    internal sealed class BufferedTabControl : TabControl
+    {
+        public BufferedTabControl()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            UpdateStyles();
+        }
+    }
+    internal sealed class BufferedDataGridView : DataGridView
+    {
+        public BufferedDataGridView()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            UpdateStyles();
+        }
+    }
 
     internal sealed class MainForm : Form
     {
         private static readonly string[] BehaviorOptions = { "Slepe Mode", "Snipe", "Avoid", "React", "Attack" };
-        private static readonly string[] TacticBehaviorOptions = { "", "Slepe First", "Slepe Mode", "Slepe Last", "Snipe First", "Snipe", "Snipe Last", "Avoid", "Kite Attack", "Kite No Attack", "Attack First", "Attack", "Attack Last", "React First", "React", "React Last" };
-        private static readonly string[] SkillOptions = { "", "No Skill", "One Skill", "Two Skills", "Max Skills" };
+        private static readonly string[] TacticBehaviorOptions = { "", "Slepe Mode", "Snipe", "Avoid", "Kite Attack", "Kite No Attack", "Attack", "React" };
+        private static readonly string[] TacticPriorityOptions = { "", "First", "Normal", "Last" };
         private static readonly string[] SkillLevelOptions = { "", "1", "2", "3", "4", "5" };
         private static readonly string[] HomunculusSkillLevelOptions = { "OFF", "Lv1", "Lv2", "Lv3", "Lv4", "Lv5" };
         private static readonly string[] HomunculusFamilies = { "Amistr", "Filir", "Lif", "Vanilmirth" };
+        private const int MaxTacticSkillCount = 999;
         private static readonly string[] UpdateManifestUrls =
         {
             "https://raw.githubusercontent.com/SleepySlepe/s7-lattice-notes/main/update-manifest.json",
@@ -97,6 +115,7 @@ namespace MobListEditor
         private ComboBox _altTProfileComboBox;
         private CheckBox _defendOwnerCheckBox;
         private CheckBox _turretStayOnCellCheckBox;
+        private CheckBox _noKsCheckBox;
         private CheckBox _antiStuckEnabledCheckBox;
         private NumericUpDown _antiStuckMsNumeric;
         private CheckBox _followOwnerOnMoveCheckBox;
@@ -113,6 +132,8 @@ namespace MobListEditor
         private ComboBox _modeComboBox;
         private Label _activeListLabel;
         private Label _statusLabel;
+        private Panel _startupOverlayPanel;
+        private Label _startupOverlayLabel;
         private Timer _statusClearTimer;
         private Label _offLabel;
         private DataGridView _whitelistGrid;
@@ -120,15 +141,19 @@ namespace MobListEditor
         private bool _suppressProfileSelectionChanged;
         private bool _isDirty;
         private bool _loadingUi;
+        private bool _startupLoaded;
 
         public MainForm()
         {
             _loadingUi = true;
+            SuspendLayout();
             Text = "SlepeAI Settings";
             Width = 1240;
             Height = 820;
             MinimumSize = new Size(1120, 720);
             StartPosition = FormStartPosition.CenterScreen;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            UpdateStyles();
             _toolTip.AutomaticDelay = 200;
             _toolTip.InitialDelay = 200;
             _toolTip.ReshowDelay = 100;
@@ -141,7 +166,7 @@ namespace MobListEditor
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             Controls.Add(root);
 
-            var tabs = new TabControl { Dock = DockStyle.Fill };
+            var tabs = new BufferedTabControl { Dock = DockStyle.Fill };
             root.Controls.Add(tabs, 0, 0);
             var behaviorTab = new TabPage("Behavior");
             var tacticsTab = new TabPage("Tactics");
@@ -170,14 +195,111 @@ namespace MobListEditor
             saveButton.Click += delegate { SaveFile(); };
             footer.Controls.Add(saveButton, 2, 0);
 
+            _startupOverlayPanel = BuildStartupOverlay();
+            Controls.Add(_startupOverlayPanel);
+            _startupOverlayPanel.BringToFront();
+
             UpdateBehaviorDescription();
             UpdateTacticsModeView();
             ApplyHomunculusSkillSettings(GetDefaultHomunculusSkillStates());
-            LoadFile();
-            LoadProfiles();
-            SetDirty(false);
-            _loadingUi = false;
+            EnableSmoothPainting(this);
+            ResumeLayout(false);
+            Shown += MainForm_Shown;
             FormClosing += MainForm_FormClosing;
+        }
+
+        private Panel BuildStartupOverlay()
+        {
+            var overlay = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(245, 247, 250) };
+            var card = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, RowCount = 3, BackColor = Color.White, Padding = new Padding(18) };
+            card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var title = new Label { AutoSize = true, Text = "SlepeAI Settings", Font = new Font("Segoe UI", 14f, FontStyle.Bold), ForeColor = Color.FromArgb(35, 35, 35), Margin = new Padding(0, 0, 0, 6) };
+            _startupOverlayLabel = new Label { AutoSize = true, Text = "Loading settings...", Font = new Font("Segoe UI", 10f, FontStyle.Regular), ForeColor = Color.FromArgb(80, 80, 80), Margin = new Padding(0, 0, 0, 10) };
+            var progress = new ProgressBar { Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 22, Width = 280, Height = 18 };
+            card.Controls.Add(title, 0, 0);
+            card.Controls.Add(_startupOverlayLabel, 0, 1);
+            card.Controls.Add(progress, 0, 2);
+
+            overlay.Controls.Add(card);
+            overlay.Resize += delegate
+            {
+                card.Left = Math.Max(0, (overlay.ClientSize.Width - card.Width) / 2);
+                card.Top = Math.Max(0, (overlay.ClientSize.Height - card.Height) / 2);
+            };
+            return overlay;
+        }
+
+        private void MainForm_Shown(object sender, EventArgs e)
+        {
+            if (_startupLoaded) return;
+            _startupLoaded = true;
+            BeginInvoke((MethodInvoker)LoadStartupData);
+        }
+
+        private void LoadStartupData()
+        {
+            try
+            {
+                SetStartupOverlayMessage("Loading settings...");
+                _profileStore = ReadProfileStore();
+                var hasProfiles = _profileStore != null && _profileStore.Profiles != null && _profileStore.Profiles.Count > 0;
+                if (hasProfiles == false)
+                {
+                    SetStartupOverlayMessage("Loading target list...");
+                    LoadFile();
+                }
+
+                SetStartupOverlayMessage("Loading profiles...");
+                LoadProfiles(false);
+                SetDirty(false);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Load failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                SetStatusMessage("Load failed", Color.FromArgb(180, 45, 45), true);
+            }
+            finally
+            {
+                _loadingUi = false;
+                if (_startupOverlayPanel != null)
+                {
+                    _startupOverlayPanel.Visible = false;
+                    _startupOverlayPanel.SendToBack();
+                }
+            }
+        }
+
+        private void SetStartupOverlayMessage(string text)
+        {
+            if (_startupOverlayLabel != null)
+            {
+                _startupOverlayLabel.Text = text;
+                _startupOverlayLabel.Refresh();
+            }
+            if (_startupOverlayPanel != null)
+            {
+                _startupOverlayPanel.Refresh();
+            }
+        }
+
+        private void EnableSmoothPainting(Control root)
+        {
+            if (root == null) return;
+            SetDoubleBuffered(root);
+            foreach (Control child in root.Controls) EnableSmoothPainting(child);
+        }
+
+        private static void SetDoubleBuffered(Control control)
+        {
+            if (control == null) return;
+            if (control is TextBox || control is ComboBox || control is NumericUpDown) return;
+            var property = typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (property != null)
+            {
+                property.SetValue(control, true, null);
+            }
         }
 
         private void SetStatusMessage(string text, Color color, bool autoClear)
@@ -317,7 +439,8 @@ namespace MobListEditor
             _defendOwnerCheckBox = AddInteractiveFeatureRow(layout, 0, "Defend Owner", true, "If enabled, owner defense bypasses whitelist and blacklist and takes priority when mobs are on you.");
             AddFeatureRow(layout, 1, "Turret Mode", "MOVE command anchors the homunculus to the clicked spot and makes it fight around that area instead of following normally.");
             _turretStayOnCellCheckBox = AddInteractiveFeatureRow(layout, 2, "Stay On Cell", false, "When turret mode is active, the homunculus stays on the anchored cell and only attacks or casts when the target is already in range.");
-            AddFeatureRow(layout, 3, "No KS", "It avoids mobs already being handled by other players or homunculi, and also avoids mobs already chasing someone else.");
+            _turretStayOnCellCheckBox.Margin = new Padding(24, 2, 6, 10);
+            _noKsCheckBox = AddInteractiveFeatureRow(layout, 3, "No KS", true, "If enabled, the homunculus avoids mobs already being handled by other players or homunculi, and also avoids mobs already chasing someone else.");
             return group;
         }
 
@@ -395,7 +518,7 @@ namespace MobListEditor
             _danceMovingOnlyCheckBox = new CheckBox { Text = "Moving Targets Only", Checked = true, AutoSize = true, Margin = new Padding(24, 2, 8, 0) };
             _danceEveryAttackCheckBox = new CheckBox { Text = "Every Attack", Checked = false, AutoSize = true, Margin = new Padding(24, 2, 8, 0) };
             _danceMoveMsNumeric = new NumericUpDown { Minimum = 100, Maximum = 3000, Value = 600, Width = 90, Margin = new Padding(0, 2, 8, 0) };
-            var help = CreateHelpLabel("Dance attack settings. The main checkbox enables dance attack behavior. Moving Targets Only limits it to moving enemies. Every Attack ignores the delay setting and tries to dance on each attack cycle.");
+            var help = CreateHelpLabel("Dance attack settings. The main checkbox enables dance attack behavior. Moving Targets Only limits it to moving enemies. Every Attack ignores the delay and moving-target-only settings.");
             help.Margin = new Padding(6, 4, 0, 0);
 
             _danceAttackEnabledCheckBox.CheckedChanged += delegate { UpdateDanceAttackControls(); };
@@ -432,7 +555,7 @@ namespace MobListEditor
         {
             if (_danceAttackEnabledCheckBox == null || _danceMovingOnlyCheckBox == null || _danceEveryAttackCheckBox == null || _danceMoveMsNumeric == null) return;
             var enabled = _danceAttackEnabledCheckBox.Checked;
-            _danceMovingOnlyCheckBox.Enabled = enabled;
+            _danceMovingOnlyCheckBox.Enabled = enabled && _danceEveryAttackCheckBox.Checked == false;
             _danceEveryAttackCheckBox.Enabled = enabled;
             _danceMoveMsNumeric.Enabled = enabled && _danceEveryAttackCheckBox.Checked == false;
         }
@@ -540,15 +663,17 @@ namespace MobListEditor
 
         private DataGridView CreateGrid()
         {
-            var grid = new DataGridView { Dock = DockStyle.Fill, AllowUserToAddRows = true, AllowUserToDeleteRows = false, AllowUserToResizeRows = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window, BorderStyle = BorderStyle.FixedSingle, EditMode = DataGridViewEditMode.EditOnEnter, MultiSelect = false, RowHeadersVisible = true, SelectionMode = DataGridViewSelectionMode.CellSelect };
+            var grid = new BufferedDataGridView { Dock = DockStyle.Fill, AllowUserToAddRows = true, AllowUserToDeleteRows = false, AllowUserToResizeRows = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window, BorderStyle = BorderStyle.FixedSingle, EditMode = DataGridViewEditMode.EditOnEnter, MultiSelect = false, RowHeadersVisible = true, SelectionMode = DataGridViewSelectionMode.CellSelect };
             grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Section", Visible = false });
             grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "MobID", HeaderText = "Mob ID", FillWeight = 12f });
             grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "MonsterName", HeaderText = "Monster Name", FillWeight = 24f });
-            var behavior = new DataGridViewComboBoxColumn { Name = "Behavior", HeaderText = "Behavior", FillWeight = 20f, FlatStyle = FlatStyle.Flat };
+            var behavior = new DataGridViewComboBoxColumn { Name = "Behavior", HeaderText = "Behavior", FillWeight = 18f, FlatStyle = FlatStyle.Flat };
             behavior.Items.AddRange(TacticBehaviorOptions);
             grid.Columns.Add(behavior);
-            var skill = new DataGridViewComboBoxColumn { Name = "Skill", HeaderText = "Skill", FillWeight = 18f, FlatStyle = FlatStyle.Flat };
-            skill.Items.AddRange(SkillOptions);
+            var priority = new DataGridViewComboBoxColumn { Name = "Priority", HeaderText = "Priority", FillWeight = 12f, FlatStyle = FlatStyle.Flat };
+            priority.Items.AddRange(TacticPriorityOptions);
+            grid.Columns.Add(priority);
+            var skill = new DataGridViewTextBoxColumn { Name = "Skill", HeaderText = "Skills", FillWeight = 12f };
             grid.Columns.Add(skill);
             var skillLevel = new DataGridViewComboBoxColumn { Name = "SkillLevel", HeaderText = "Skill Level", FillWeight = 12f, FlatStyle = FlatStyle.Flat };
             skillLevel.Items.AddRange(SkillLevelOptions);
@@ -864,9 +989,12 @@ namespace MobListEditor
             File.WriteAllText(_targetListsPath, text, new UTF8Encoding(false));
         }
 
-        private void LoadProfiles()
+        private void LoadProfiles(bool reloadStore = true)
         {
-            _profileStore = ReadProfileStore();
+            if (reloadStore || _profileStore == null)
+            {
+                _profileStore = ReadProfileStore();
+            }
             if (_profileStore.Profiles == null || _profileStore.Profiles.Count == 0)
             {
                 var initial = CaptureCurrentSnapshot("Profile 1", Guid.NewGuid().ToString("N"));
@@ -997,6 +1125,25 @@ namespace MobListEditor
             return normalized;
         }
 
+        private static bool SnapshotNeedsTacticMigration(EditorProfileSnapshot snapshot)
+        {
+            if (snapshot == null) return false;
+            return EntriesNeedTacticMigration(snapshot.Whitelist) || EntriesNeedTacticMigration(snapshot.Blacklist);
+        }
+
+        private static bool EntriesNeedTacticMigration(List<TacticEntry> entries)
+        {
+            if (entries == null) return false;
+            foreach (var entry in entries)
+            {
+                if (entry == null || entry.IsSection) continue;
+                var normalized = NormalizeTacticEntry(entry);
+                if (!string.Equals(entry.Behavior ?? string.Empty, normalized.Behavior ?? string.Empty, StringComparison.OrdinalIgnoreCase)) return true;
+                if (!string.Equals(entry.Priority ?? string.Empty, normalized.Priority ?? string.Empty, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
         private EditorProfileSnapshot ReadProfileSnapshot(string id, string fallbackName)
         {
             try
@@ -1007,7 +1154,12 @@ namespace MobListEditor
                     var loaded = _serializer.Deserialize<EditorProfileSnapshot>(File.ReadAllText(path, Encoding.UTF8));
                     if (loaded != null)
                     {
-                        return NormalizeSnapshot(loaded, fallbackName, id);
+                        var normalized = NormalizeSnapshot(loaded, fallbackName, id);
+                        if (SnapshotNeedsTacticMigration(loaded))
+                        {
+                            File.WriteAllText(path, _serializer.Serialize(normalized), new UTF8Encoding(false));
+                        }
+                        return normalized;
                     }
                 }
             }
@@ -1215,8 +1367,17 @@ namespace MobListEditor
                 var row = rowMatch.Groups["row"].Value;
                 var section = ParseStringField(row, "Section");
                 var mobId = ParseIntField(row, "MobID", 0);
-                if (mobId == 0) { if (!string.IsNullOrWhiteSpace(section)) result.Add(new TacticEntry { Section = section, IsSection = true, MonsterName = section, Skill = string.Empty, Behavior = string.Empty }); continue; }
-                result.Add(new TacticEntry { Section = string.Empty, IsSection = false, MobID = mobId, MonsterName = ParseStringField(row, "MonsterName"), Behavior = ParseStringField(row, "Behavior"), Skill = ParseStringField(row, "Skill"), SkillLevel = ParseIntField(row, "SkillLevel", 0) });
+                if (mobId == 0) { if (!string.IsNullOrWhiteSpace(section)) result.Add(new TacticEntry { Section = section, IsSection = true, MonsterName = section, Skill = string.Empty, Behavior = string.Empty, Priority = string.Empty }); continue; }
+                var behavior = ParseStringField(row, "Behavior");
+                var priority = ParseStringField(row, "Priority");
+                string legacyBehavior;
+                string legacyPriority;
+                SplitLegacyTacticBehaviorAndPriority(behavior, out legacyBehavior, out legacyPriority);
+                behavior = NormalizeTacticBehaviorChoice(behavior);
+                if (string.IsNullOrWhiteSpace(behavior)) behavior = legacyBehavior;
+                priority = NormalizeTacticPriorityChoice(priority, behavior);
+                if (string.IsNullOrWhiteSpace(priority)) priority = NormalizeTacticPriorityChoice(legacyPriority, behavior);
+                result.Add(new TacticEntry { Section = string.Empty, IsSection = false, MobID = mobId, MonsterName = ParseStringField(row, "MonsterName"), Behavior = behavior, Priority = priority, Skill = ParseSkillCountField(row, "Skill", 0).ToString(), SkillLevel = ParseIntField(row, "SkillLevel", 0) });
             }
             return result;
         }
@@ -1259,7 +1420,7 @@ namespace MobListEditor
 
         private static RuntimeSettings GetDefaultRuntimeSettings()
         {
-            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 700, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
+            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, NoKS = true, AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 700, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
         }
 
         private static RuntimeSettings ParseRuntimeSettings(string text)
@@ -1269,6 +1430,7 @@ namespace MobListEditor
             if (string.IsNullOrWhiteSpace(body)) return result;
             result.DefendOwner = !Regex.IsMatch(body, "DefendOwner\\s*=\\s*false", RegexOptions.IgnoreCase);
             result.TurretStayOnCell = Regex.IsMatch(body, "TurretStayOnCell\\s*=\\s*true", RegexOptions.IgnoreCase);
+            result.NoKS = !Regex.IsMatch(body, "NoKS\\s*=\\s*false", RegexOptions.IgnoreCase);
             result.AntiStuckEnabled = !Regex.IsMatch(body, "AntiStuckEnabled\\s*=\\s*false", RegexOptions.IgnoreCase);
             result.AntiStuckMs = ClampRuntimeMs(ParseIntField(body, "AntiStuckMs", result.AntiStuckMs));
             result.FollowOwnerOnMove = !Regex.IsMatch(body, "FollowOwnerOnMove\\s*=\\s*false", RegexOptions.IgnoreCase);
@@ -1313,19 +1475,72 @@ namespace MobListEditor
 
         private static string ParseStringField(string row, string field) { var match = Regex.Match(row, field + "\\s*=\\s*[\"'](?<value>[^\"']*)[\"']", RegexOptions.IgnoreCase); return match.Success ? match.Groups["value"].Value : string.Empty; }
         private static int ParseIntField(string row, string field, int defaultValue) { var match = Regex.Match(row, field + "\\s*=\\s*(\\d+)", RegexOptions.IgnoreCase); return match.Success ? int.Parse(match.Groups[1].Value) : defaultValue; }
+        private static int ClampTacticSkillCount(int count) { if (count < 0) return 0; if (count > MaxTacticSkillCount) return MaxTacticSkillCount; return count; }
+        private static int NormalizeLegacySkillCount(string value)
+        {
+            var normalized = (value ?? string.Empty).Trim();
+            if (string.Equals(normalized, "No Skill", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (string.Equals(normalized, "One Skill", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (string.Equals(normalized, "Two Skills", StringComparison.OrdinalIgnoreCase)) return 2;
+            if (string.Equals(normalized, "Max Skills", StringComparison.OrdinalIgnoreCase)) return MaxTacticSkillCount;
+            return -1;
+        }
+        private static bool TryParseSkillCountText(string value, out int skillCount)
+        {
+            var normalized = (value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                skillCount = 0;
+                return true;
+            }
+
+            int parsed;
+            if (int.TryParse(normalized, out parsed))
+            {
+                if (parsed < 0) { skillCount = 0; return false; }
+                skillCount = ClampTacticSkillCount(parsed);
+                return true;
+            }
+
+            parsed = NormalizeLegacySkillCount(normalized);
+            if (parsed >= 0)
+            {
+                skillCount = parsed;
+                return true;
+            }
+
+            skillCount = 0;
+            return false;
+        }
+        private static int ParseSkillCountField(string row, string field, int defaultValue)
+        {
+            var numeric = ParseIntField(row, field, int.MinValue);
+            if (numeric != int.MinValue) return ClampTacticSkillCount(numeric);
+            var text = ParseStringField(row, field);
+            int parsed;
+            if (TryParseSkillCountText(text, out parsed)) return parsed;
+            return ClampTacticSkillCount(defaultValue);
+        }
+        private static string NormalizeSkillCountText(string value)
+        {
+            int parsed;
+            return TryParseSkillCountText(value, out parsed) ? parsed.ToString() : "0";
+        }
 
         private static void PopulateGrid(DataGridView grid, List<TacticEntry> entries)
         {
             grid.Rows.Clear();
             foreach (var entry in entries)
             {
+                var normalized = NormalizeTacticEntry(entry);
                 var index = grid.Rows.Add(
-                    entry.IsSection ? (entry.Section ?? entry.MonsterName ?? string.Empty) : string.Empty,
-                    entry.IsSection ? string.Empty : entry.MobID.ToString(),
-                    entry.MonsterName ?? string.Empty,
-                    entry.IsSection ? string.Empty : NormalizeChoice(entry.Behavior, TacticBehaviorOptions),
-                    entry.IsSection ? string.Empty : NormalizeChoice(entry.Skill, SkillOptions),
-                    (entry.IsSection || entry.SkillLevel <= 0) ? string.Empty : entry.SkillLevel.ToString());
+                    normalized.IsSection ? (normalized.Section ?? normalized.MonsterName ?? string.Empty) : string.Empty,
+                    normalized.IsSection ? string.Empty : normalized.MobID.ToString(),
+                    normalized.MonsterName ?? string.Empty,
+                    normalized.IsSection ? string.Empty : NormalizeTacticBehaviorChoice(normalized.Behavior),
+                    normalized.IsSection ? string.Empty : NormalizeTacticPriorityChoice(normalized.Priority, normalized.Behavior),
+                    normalized.IsSection ? string.Empty : NormalizeSkillCountText(normalized.Skill),
+                    (normalized.IsSection || normalized.SkillLevel <= 0) ? string.Empty : normalized.SkillLevel.ToString());
                 ApplyRowStyle(grid.Rows[index]);
             }
             RefreshRowStyles(grid);
@@ -1342,21 +1557,26 @@ namespace MobListEditor
                 var mobIdText = Convert.ToString(row.Cells["MobID"].Value);
                 var name = Convert.ToString(row.Cells["MonsterName"].Value);
                 var behavior = Convert.ToString(row.Cells["Behavior"].Value);
+                var priority = Convert.ToString(row.Cells["Priority"].Value);
                 var skill = Convert.ToString(row.Cells["Skill"].Value);
                 var skillLevelText = Convert.ToString(row.Cells["SkillLevel"].Value);
-                if (string.IsNullOrWhiteSpace(section) && string.IsNullOrWhiteSpace(mobIdText) && string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(behavior) && string.IsNullOrWhiteSpace(skill) && string.IsNullOrWhiteSpace(skillLevelText)) continue;
+                if (string.IsNullOrWhiteSpace(section) && string.IsNullOrWhiteSpace(mobIdText) && string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(behavior) && string.IsNullOrWhiteSpace(priority) && string.IsNullOrWhiteSpace(skill) && string.IsNullOrWhiteSpace(skillLevelText)) continue;
                 if (string.IsNullOrWhiteSpace(mobIdText))
                 {
                     var label = !string.IsNullOrWhiteSpace(section) ? section : name;
                     if (string.IsNullOrWhiteSpace(label)) throw new InvalidOperationException("Section rows need a label.");
-                    result.Add(new TacticEntry { Section = label.Trim(), MonsterName = label.Trim(), IsSection = true, Behavior = string.Empty, Skill = string.Empty });
+                    result.Add(new TacticEntry { Section = label.Trim(), MonsterName = label.Trim(), IsSection = true, Behavior = string.Empty, Priority = string.Empty, Skill = string.Empty });
                     continue;
                 }
                 int mobId;
                 if (!int.TryParse(mobIdText.Trim(), out mobId) || mobId <= 0) throw new InvalidOperationException("Invalid Mob ID: " + mobIdText);
                 int skillLevel = 0;
                 if (!string.IsNullOrWhiteSpace(skillLevelText) && (!int.TryParse(skillLevelText.Trim(), out skillLevel) || skillLevel < 1 || skillLevel > 5)) throw new InvalidOperationException("Invalid Skill Level for Mob ID " + mobId + ": " + skillLevelText);
-                if (seen.Add(mobId)) result.Add(new TacticEntry { Section = string.Empty, IsSection = false, MobID = mobId, MonsterName = (name ?? string.Empty).Trim(), Behavior = NormalizeChoice(behavior, TacticBehaviorOptions), Skill = NormalizeChoice(skill, SkillOptions), SkillLevel = skillLevel });
+                int skillCount;
+                if (!TryParseSkillCountText(skill, out skillCount)) throw new InvalidOperationException("Invalid Skills value for Mob ID " + mobId + ": " + skill);
+                behavior = NormalizeTacticBehaviorChoice(behavior);
+                priority = NormalizeTacticPriorityChoice(priority, behavior);
+                if (seen.Add(mobId)) result.Add(new TacticEntry { Section = string.Empty, IsSection = false, MobID = mobId, MonsterName = (name ?? string.Empty).Trim(), Behavior = behavior, Priority = priority, Skill = skillCount.ToString(), SkillLevel = skillLevel });
             }
             return result;
         }
@@ -1399,6 +1619,7 @@ namespace MobListEditor
             var runtime = settings ?? GetDefaultRuntimeSettings();
             _defendOwnerCheckBox.Checked = runtime.DefendOwner;
             _turretStayOnCellCheckBox.Checked = runtime.TurretStayOnCell;
+            _noKsCheckBox.Checked = runtime.NoKS != false;
             _antiStuckEnabledCheckBox.Checked = runtime.AntiStuckEnabled;
             _antiStuckMsNumeric.Value = ClampRuntimeMs(runtime.AntiStuckMs);
             _antiStuckMsNumeric.Enabled = _antiStuckEnabledCheckBox.Checked;
@@ -1449,6 +1670,7 @@ namespace MobListEditor
             {
                 DefendOwner = _defendOwnerCheckBox.Checked,
                 TurretStayOnCell = _turretStayOnCellCheckBox.Checked,
+                NoKS = _noKsCheckBox.Checked,
                 AntiStuckEnabled = _antiStuckEnabledCheckBox.Checked,
                 AntiStuckMs = ClampRuntimeMs((int)_antiStuckMsNumeric.Value),
                 FollowOwnerOnMove = _followOwnerOnMoveCheckBox.Checked,
@@ -1486,7 +1708,7 @@ namespace MobListEditor
             if (grid == null) return;
             var index = grid.Rows.Count - 1;
             if (grid.CurrentCell != null && grid.CurrentCell.RowIndex >= 0 && grid.CurrentCell.RowIndex < grid.Rows.Count - 1) index = grid.CurrentCell.RowIndex + 1;
-            grid.Rows.Insert(index, "new_map", string.Empty, "new_map", string.Empty, string.Empty, string.Empty);
+            grid.Rows.Insert(index, "new_map", string.Empty, "new_map", string.Empty, string.Empty, string.Empty, string.Empty);
             RefreshRowStyles(grid);
             grid.CurrentCell = grid.Rows[index].Cells["MonsterName"];
             grid.BeginEdit(true);
@@ -1504,10 +1726,10 @@ namespace MobListEditor
         }
 
         private DataGridView ActiveGrid() { if (_whitelistGrid.Visible) return _whitelistGrid; if (_blacklistGrid.Visible) return _blacklistGrid; return null; }
-        private static object[] CaptureRow(DataGridViewRow row) { return new object[] { row.Cells["Section"].Value, row.Cells["MobID"].Value, row.Cells["MonsterName"].Value, row.Cells["Behavior"].Value, row.Cells["Skill"].Value, row.Cells["SkillLevel"].Value }; }
-        private static void ApplyRow(DataGridViewRow row, object[] values) { row.Cells["Section"].Value = values[0]; row.Cells["MobID"].Value = values[1]; row.Cells["MonsterName"].Value = values[2]; row.Cells["Behavior"].Value = values[3]; row.Cells["Skill"].Value = values[4]; row.Cells["SkillLevel"].Value = values[5]; ApplyRowStyle(row); }
+        private static object[] CaptureRow(DataGridViewRow row) { return new object[] { row.Cells["Section"].Value, row.Cells["MobID"].Value, row.Cells["MonsterName"].Value, row.Cells["Behavior"].Value, row.Cells["Priority"].Value, row.Cells["Skill"].Value, row.Cells["SkillLevel"].Value }; }
+        private static void ApplyRow(DataGridViewRow row, object[] values) { row.Cells["Section"].Value = values[0]; row.Cells["MobID"].Value = values[1]; row.Cells["MonsterName"].Value = values[2]; row.Cells["Behavior"].Value = values[3]; row.Cells["Priority"].Value = values[4]; row.Cells["Skill"].Value = values[5]; row.Cells["SkillLevel"].Value = values[6]; ApplyRowStyle(row); }
         private static void RefreshRowStyles(DataGridView grid) { foreach (DataGridViewRow row in grid.Rows) if (!row.IsNewRow) ApplyRowStyle(row); }
-        private static void ApplyRowStyle(DataGridViewRow row) { var section = Convert.ToString(row.Cells["Section"].Value); var mobId = Convert.ToString(row.Cells["MobID"].Value); var isSection = !string.IsNullOrWhiteSpace(section) && string.IsNullOrWhiteSpace(mobId); row.DefaultCellStyle.BackColor = isSection ? Color.FromArgb(238, 244, 252) : SystemColors.Window; row.DefaultCellStyle.Font = new Font("Segoe UI", 9f, isSection ? FontStyle.Bold : FontStyle.Regular); row.Cells["Behavior"].ReadOnly = isSection; row.Cells["Skill"].ReadOnly = isSection; row.Cells["SkillLevel"].ReadOnly = isSection; }
+        private static void ApplyRowStyle(DataGridViewRow row) { var section = Convert.ToString(row.Cells["Section"].Value); var mobId = Convert.ToString(row.Cells["MobID"].Value); var isSection = !string.IsNullOrWhiteSpace(section) && string.IsNullOrWhiteSpace(mobId); row.DefaultCellStyle.BackColor = isSection ? Color.FromArgb(238, 244, 252) : SystemColors.Window; row.DefaultCellStyle.Font = new Font("Segoe UI", 9f, isSection ? FontStyle.Bold : FontStyle.Regular); row.Cells["Behavior"].ReadOnly = isSection; row.Cells["Priority"].ReadOnly = isSection; row.Cells["Skill"].ReadOnly = isSection; row.Cells["SkillLevel"].ReadOnly = isSection; }
 
         private void UpdateBehaviorDescription()
         {
@@ -1546,6 +1768,93 @@ namespace MobListEditor
             return "Square CW";
         }
         private static string NormalizeChoice(string value, string[] options) { var trimmed = (value ?? string.Empty).Trim(); foreach (var option in options) if (string.Equals(option, trimmed, StringComparison.OrdinalIgnoreCase)) return option; return options.Length > 0 ? options[0] : string.Empty; }
+        private static TacticEntry NormalizeTacticEntry(TacticEntry entry)
+        {
+            if (entry == null) return new TacticEntry { Section = string.Empty, IsSection = false, Behavior = string.Empty, Priority = string.Empty, Skill = "0", SkillLevel = 0 };
+            if (entry.IsSection)
+            {
+                return new TacticEntry
+                {
+                    Section = entry.Section,
+                    IsSection = true,
+                    MobID = entry.MobID,
+                    MonsterName = entry.MonsterName,
+                    Behavior = string.Empty,
+                    Priority = string.Empty,
+                    Skill = string.Empty,
+                    SkillLevel = entry.SkillLevel
+                };
+            }
+
+            string legacyBehavior;
+            string legacyPriority;
+            SplitLegacyTacticBehaviorAndPriority(entry.Behavior, out legacyBehavior, out legacyPriority);
+
+            var behavior = NormalizeTacticBehaviorChoice(entry.Behavior);
+            if (string.IsNullOrWhiteSpace(behavior)) behavior = legacyBehavior;
+
+            var priority = NormalizeTacticPriorityChoice(entry.Priority, behavior);
+            if (string.IsNullOrWhiteSpace(priority)) priority = NormalizeTacticPriorityChoice(legacyPriority, behavior);
+
+            return new TacticEntry
+            {
+                Section = entry.Section,
+                IsSection = false,
+                MobID = entry.MobID,
+                MonsterName = entry.MonsterName,
+                Behavior = behavior,
+                Priority = priority,
+                Skill = NormalizeSkillCountText(entry.Skill),
+                SkillLevel = entry.SkillLevel
+            };
+        }
+        private static bool BehaviorSupportsPriority(string behavior)
+        {
+            var normalized = NormalizeTacticBehaviorChoice(behavior);
+            return normalized == "Slepe Mode" || normalized == "Snipe" || normalized == "Attack" || normalized == "React";
+        }
+        private static void SplitLegacyTacticBehaviorAndPriority(string value, out string behavior, out string priority)
+        {
+            var normalized = (value ?? string.Empty).Trim();
+            behavior = string.Empty;
+            priority = string.Empty;
+
+            if (string.Equals(normalized, "Slepe First", StringComparison.OrdinalIgnoreCase)) { behavior = "Slepe Mode"; priority = "First"; return; }
+            if (string.Equals(normalized, "Slepe Last", StringComparison.OrdinalIgnoreCase)) { behavior = "Slepe Mode"; priority = "Last"; return; }
+            if (string.Equals(normalized, "Slepe", StringComparison.OrdinalIgnoreCase) || string.Equals(normalized, "Slepe Mode", StringComparison.OrdinalIgnoreCase)) { behavior = "Slepe Mode"; priority = "Normal"; return; }
+            if (string.Equals(normalized, "Snipe First", StringComparison.OrdinalIgnoreCase)) { behavior = "Snipe"; priority = "First"; return; }
+            if (string.Equals(normalized, "Snipe Last", StringComparison.OrdinalIgnoreCase)) { behavior = "Snipe"; priority = "Last"; return; }
+            if (string.Equals(normalized, "Snipe", StringComparison.OrdinalIgnoreCase)) { behavior = "Snipe"; priority = "Normal"; return; }
+            if (string.Equals(normalized, "Attack First", StringComparison.OrdinalIgnoreCase)) { behavior = "Attack"; priority = "First"; return; }
+            if (string.Equals(normalized, "Attack Last", StringComparison.OrdinalIgnoreCase)) { behavior = "Attack"; priority = "Last"; return; }
+            if (string.Equals(normalized, "Attack", StringComparison.OrdinalIgnoreCase)) { behavior = "Attack"; priority = "Normal"; return; }
+            if (string.Equals(normalized, "React First", StringComparison.OrdinalIgnoreCase)) { behavior = "React"; priority = "First"; return; }
+            if (string.Equals(normalized, "React Last", StringComparison.OrdinalIgnoreCase)) { behavior = "React"; priority = "Last"; return; }
+            if (string.Equals(normalized, "React", StringComparison.OrdinalIgnoreCase)) { behavior = "React"; priority = "Normal"; return; }
+            if (string.Equals(normalized, "Avoid", StringComparison.OrdinalIgnoreCase)) { behavior = "Avoid"; return; }
+            if (string.Equals(normalized, "Kite Away", StringComparison.OrdinalIgnoreCase) || string.Equals(normalized, "Kite Attack", StringComparison.OrdinalIgnoreCase)) { behavior = "Kite Attack"; return; }
+            if (string.Equals(normalized, "Kite No Attack", StringComparison.OrdinalIgnoreCase)) { behavior = "Kite No Attack"; return; }
+        }
+        private static string NormalizeTacticBehaviorChoice(string value)
+        {
+            var normalized = NormalizeChoice(value, TacticBehaviorOptions);
+            if (!string.IsNullOrWhiteSpace(normalized)) return normalized;
+            string behavior;
+            string priority;
+            SplitLegacyTacticBehaviorAndPriority(value, out behavior, out priority);
+            return behavior;
+        }
+        private static string NormalizeTacticPriorityChoice(string value, string behavior)
+        {
+            if (!BehaviorSupportsPriority(behavior)) return string.Empty;
+            var normalized = NormalizeChoice(value, TacticPriorityOptions);
+            if (!string.IsNullOrWhiteSpace(normalized)) return normalized;
+            string legacyBehavior;
+            string legacyPriority;
+            SplitLegacyTacticBehaviorAndPriority(value, out legacyBehavior, out legacyPriority);
+            if (!string.IsNullOrWhiteSpace(legacyPriority)) return legacyPriority;
+            return "Normal";
+        }
         private static string LevelToDisplay(int level) { return level < 1 ? "OFF" : "Lv" + level; }
         private static int DisplayToLevel(string value) { var match = Regex.Match((value ?? string.Empty).Trim(), "(\\d+)"); return match.Success ? ClampLevel(int.Parse(match.Groups[1].Value)) : 0; }
         private static int ClampLevel(int level) { if (level < 0) return 0; if (level > 5) return 5; return level; }
@@ -1553,9 +1862,9 @@ namespace MobListEditor
         private static int ClampPatrolDistance(int value) { if (value < 1) return 1; if (value > 12) return 12; return value; }
         private static int ClampRuntimeMs(int value) { if (value < 0) return 0; if (value > 10000) return 10000; return value; }
         private static string BuildSkillStateKey(string family, string skillKey) { return family + "." + skillKey; }
-        private static List<TacticEntry> CloneEntries(List<TacticEntry> entries) { return (entries ?? new List<TacticEntry>()).Select(entry => new TacticEntry { Section = entry.Section, IsSection = entry.IsSection, MobID = entry.MobID, MonsterName = entry.MonsterName, Behavior = entry.Behavior, Skill = entry.Skill, SkillLevel = entry.SkillLevel }).ToList(); }
+        private static List<TacticEntry> CloneEntries(List<TacticEntry> entries) { return (entries ?? new List<TacticEntry>()).Select(entry => NormalizeTacticEntry(entry)).ToList(); }
         private static Dictionary<string, HomunculusSkillState> CloneSkillSettings(Dictionary<string, HomunculusSkillState> settings) { var result = new Dictionary<string, HomunculusSkillState>(StringComparer.OrdinalIgnoreCase); if (settings == null) return result; foreach (var pair in settings) result[pair.Key] = new HomunculusSkillState { MinSPPercent = pair.Value.MinSPPercent, Level = pair.Value.Level, OwnerHPPercent = pair.Value.OwnerHPPercent, HomunHPPercent = pair.Value.HomunHPPercent }; return result; }
-        private static RuntimeSettings CloneRuntimeSettings(RuntimeSettings settings) { var value = settings ?? GetDefaultRuntimeSettings(); return new RuntimeSettings { DefendOwner = value.DefendOwner, TurretStayOnCell = value.TurretStayOnCell, AntiStuckEnabled = value.AntiStuckEnabled, AntiStuckMs = ClampRuntimeMs(value.AntiStuckMs), FollowOwnerOnMove = value.FollowOwnerOnMove, FollowOwnerDelayMs = ClampRuntimeMs(value.FollowOwnerDelayMs), SoftResetMs = ClampRuntimeMs(value.SoftResetMs), OwnerResumeMs = ClampRuntimeMs(value.OwnerResumeMs), PostSkillWaitMs = ClampRuntimeMs(value.PostSkillWaitMs), DanceAttackEnabled = value.DanceAttackEnabled, DanceMovingOnly = value.DanceMovingOnly, DanceEveryAttack = value.DanceEveryAttack, DanceMoveMs = ClampRuntimeMs(value.DanceMoveMs) }; }
+        private static RuntimeSettings CloneRuntimeSettings(RuntimeSettings settings) { var value = settings ?? GetDefaultRuntimeSettings(); return new RuntimeSettings { DefendOwner = value.DefendOwner, TurretStayOnCell = value.TurretStayOnCell, NoKS = value.NoKS == false ? (bool?)false : true, AntiStuckEnabled = value.AntiStuckEnabled, AntiStuckMs = ClampRuntimeMs(value.AntiStuckMs), FollowOwnerOnMove = value.FollowOwnerOnMove, FollowOwnerDelayMs = ClampRuntimeMs(value.FollowOwnerDelayMs), SoftResetMs = ClampRuntimeMs(value.SoftResetMs), OwnerResumeMs = ClampRuntimeMs(value.OwnerResumeMs), PostSkillWaitMs = ClampRuntimeMs(value.PostSkillWaitMs), DanceAttackEnabled = value.DanceAttackEnabled, DanceMovingOnly = value.DanceMovingOnly, DanceEveryAttack = value.DanceEveryAttack, DanceMoveMs = ClampRuntimeMs(value.DanceMoveMs) }; }
         private static string PromptForText(IWin32Window owner, string title, string prompt, string initialValue)
         {
             using (var form = new Form())
@@ -1592,7 +1901,7 @@ namespace MobListEditor
             builder.AppendLine();
             builder.AppendLine("TargetLists.Patrol = { Enabled = " + ((patrolSettings != null && patrolSettings.Enabled) ? "true" : "false") + ", Shape = \"" + EscapeLua(NormalizePatrolShape(patrolSettings != null ? patrolSettings.Shape : "Square CW")) + "\", Distance = " + ClampPatrolDistance(patrolSettings != null ? patrolSettings.Distance : 4) + " }");
             runtimeSettings = CloneRuntimeSettings(runtimeSettings);
-            builder.AppendLine("TargetLists.Runtime = { DefendOwner = " + (runtimeSettings.DefendOwner ? "true" : "false") + ", TurretStayOnCell = " + (runtimeSettings.TurretStayOnCell ? "true" : "false") + ", AntiStuckEnabled = " + (runtimeSettings.AntiStuckEnabled ? "true" : "false") + ", AntiStuckMs = " + runtimeSettings.AntiStuckMs + ", FollowOwnerOnMove = " + (runtimeSettings.FollowOwnerOnMove ? "true" : "false") + ", FollowOwnerDelayMs = " + runtimeSettings.FollowOwnerDelayMs + ", SoftResetMs = " + runtimeSettings.SoftResetMs + ", OwnerResumeMs = " + runtimeSettings.OwnerResumeMs + ", PostSkillWaitMs = " + runtimeSettings.PostSkillWaitMs + ", DanceAttackEnabled = " + (runtimeSettings.DanceAttackEnabled ? "true" : "false") + ", DanceMovingOnly = " + (runtimeSettings.DanceMovingOnly ? "true" : "false") + ", DanceEveryAttack = " + (runtimeSettings.DanceEveryAttack ? "true" : "false") + ", DanceMoveMs = " + runtimeSettings.DanceMoveMs + " }");
+            builder.AppendLine("TargetLists.Runtime = { DefendOwner = " + (runtimeSettings.DefendOwner ? "true" : "false") + ", TurretStayOnCell = " + (runtimeSettings.TurretStayOnCell ? "true" : "false") + ", NoKS = " + (runtimeSettings.NoKS != false ? "true" : "false") + ", AntiStuckEnabled = " + (runtimeSettings.AntiStuckEnabled ? "true" : "false") + ", AntiStuckMs = " + runtimeSettings.AntiStuckMs + ", FollowOwnerOnMove = " + (runtimeSettings.FollowOwnerOnMove ? "true" : "false") + ", FollowOwnerDelayMs = " + runtimeSettings.FollowOwnerDelayMs + ", SoftResetMs = " + runtimeSettings.SoftResetMs + ", OwnerResumeMs = " + runtimeSettings.OwnerResumeMs + ", PostSkillWaitMs = " + runtimeSettings.PostSkillWaitMs + ", DanceAttackEnabled = " + (runtimeSettings.DanceAttackEnabled ? "true" : "false") + ", DanceMovingOnly = " + (runtimeSettings.DanceMovingOnly ? "true" : "false") + ", DanceEveryAttack = " + (runtimeSettings.DanceEveryAttack ? "true" : "false") + ", DanceMoveMs = " + runtimeSettings.DanceMoveMs + " }");
             builder.AppendLine();
             builder.AppendLine("TargetLists.HomunculusSkills = {");
             AppendHomunculusSkills(builder, homunculusSkillSettings);
@@ -1639,8 +1948,12 @@ namespace MobListEditor
                 var line = new StringBuilder();
                 line.Append("    { MobID = ").Append(entry.MobID);
                 line.Append(", MonsterName = \"").Append(EscapeLua(entry.MonsterName ?? string.Empty)).Append("\"");
-                line.Append(", Behavior = \"").Append(EscapeLua(string.IsNullOrWhiteSpace(entry.Behavior) ? "Attack" : entry.Behavior)).Append("\"");
-                line.Append(", Skill = \"").Append(EscapeLua(string.IsNullOrWhiteSpace(entry.Skill) ? "No Skill" : entry.Skill)).Append("\"");
+                var behavior = NormalizeTacticBehaviorChoice(entry.Behavior);
+                if (string.IsNullOrWhiteSpace(behavior)) behavior = "Attack";
+                var priority = NormalizeTacticPriorityChoice(entry.Priority, behavior);
+                line.Append(", Behavior = \"").Append(EscapeLua(behavior)).Append("\"");
+                line.Append(", Priority = \"").Append(EscapeLua(priority)).Append("\"");
+                line.Append(", Skill = ").Append(NormalizeSkillCountText(entry.Skill));
                 line.Append(", SkillLevel = ").Append(entry.SkillLevel);
                 line.Append(" },");
                 builder.AppendLine(line.ToString());

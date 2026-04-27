@@ -1,9 +1,13 @@
 {
-  "version": "1.1",
+  "version": "1.2",
   "channel": "stable",
   "files": [
     {
       "path": "AI.lua",
+      "kind": "lua"
+    },
+    {
+      "path": "AI_M.lua",
       "kind": "lua"
     },
     {
@@ -38,6 +42,8 @@
     "*.bak"
   ],
   "notes": [
+    "Patch 1.2 Filir update: updates the live homunculus AI with the current Filir movement, Moonlight, buff, and targeting behavior fixes.",
+    "Includes the current live AI_M.lua so mercenary users receive the safe basic mercenary script instead of older experimental mercenary code.",
     "Updater payloads must never overwrite user tactics, runtime behavior settings, homunculus skill settings, patrol settings, profile metadata, or profile snapshots.",
     "TargetLists.lua stores tactics, behavior mode, patrol, runtime settings, and homunculus skill settings.",
     "SlepeAI Settings Profiles.json and Profiles/ store profile state."

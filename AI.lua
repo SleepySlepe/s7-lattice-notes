@@ -140,6 +140,12 @@ function EnsureRuntimeDefaults()
 		TargetLists.Runtime.TurretStayOnCell = TargetLists.Runtime.TurretStayOnCell == true
 	end
 
+	if TargetLists.Runtime.NoKS == nil then
+		TargetLists.Runtime.NoKS = true
+	else
+		TargetLists.Runtime.NoKS = TargetLists.Runtime.NoKS == true
+	end
+
 	if TargetLists.Runtime.AntiStuckEnabled == nil then
 		TargetLists.Runtime.AntiStuckEnabled = true
 	else
@@ -180,19 +186,35 @@ end
 
 EnsureRuntimeDefaults()
 
-function NormalizeSkillModeValue(value)
-	local mode = string.lower(tostring(value or ""))
-	if mode == "no skill" then
-		return "No Skill"
-	elseif mode == "one skill" then
-		return "One Skill"
-	elseif mode == "two skills" then
-		return "Two Skills"
-	elseif mode == "max skills" then
-		return "Max Skills"
+function NormalizeSkillCountValue(value)
+	if value == nil then
+		return 999
 	end
 
-	return "Max Skills"
+	local numeric = tonumber(value)
+	if numeric ~= nil then
+		numeric = math.floor(numeric)
+		if numeric < 0 then
+			return 0
+		end
+		if numeric > 999 then
+			return 999
+		end
+		return numeric
+	end
+
+	local mode = string.lower(tostring(value or ""))
+	if mode == "no skill" then
+		return 0
+	elseif mode == "one skill" then
+		return 1
+	elseif mode == "two skills" then
+		return 2
+	elseif mode == "max skills" then
+		return 999
+	end
+
+	return 999
 end
 
 function NormalizeListEntries(source)
@@ -235,7 +257,8 @@ function NormalizeListEntries(source)
 
 			tactics[mobID] = {
 				Behavior = tostring(value.Behavior or ""),
-				Skill = NormalizeSkillModeValue(value.Skill),
+				Priority = tostring(value.Priority or ""),
+				Skill = NormalizeSkillCountValue(value.Skill),
 				SkillLevel = skillLevel
 			}
 		end
@@ -271,9 +294,11 @@ CHAOTIC_BLESSINGS_DELAY_MS = 3000
 CAPRICE_RETRY_MS = 100
 FILIR_OFFENSIVE_RETRY_MS = 100
 CAPRICE_CONFIRM_TIMEOUT_MS = 5000
+SKILL_RESERVATION_MS = 1200
+ONE_SKILL_ATTEMPT_LOCK_MS = 3500
 MANUAL_CAPRICE_TIMEOUT_MS = 5000
 FILIR_SUPPORT_CONFIRM_TIMEOUT_MS = 1000
-FILIR_SUPPORT_RETRY_MS = 500
+FILIR_SUPPORT_RETRY_MS = 10000
 FILIR_SUPPORT_MAX_PERSIST_MS = 180000
 MOONLIGHT_SKILL = 8009
 FLITTING_SKILL = 8010
@@ -314,6 +339,13 @@ PATROL_MOVE_MS = 0
 PATROL_STALL_MS = 400
 SNIPE_ORBIT_MS = 300
 IDLE_STANDBY_REISSUE_MS = 250
+MOTION_DANCE = MOTION_DANCE or 16
+MOTION_PERFORM = MOTION_PERFORM or 17
+VANIL_SONG_BUFF_RANGE = 3
+VANIL_SONG_BUFF_DURATION_MS = 19000
+VANIL_SONG_PROVIDER_ACTIVE_MS = 180000
+VANIL_SONG_SEARCH_RANGE = 20
+VANIL_SONG_REPATH_MS = 300
 
 MyID = 0
 CurrentState = STATE_IDLE
@@ -370,6 +402,8 @@ ProtectedMob = {}
 KiteNoAttackDone = {}
 SkillCastCount = {}
 SkillCastCountByClass = {}
+SkillCastReservations = {}
+OneSkillAttemptLatch = {}
 LastSeenPosX = {}
 LastSeenPosY = {}
 Breadcrumb1X = {}
@@ -388,6 +422,17 @@ SightRecoveryStep = 1
 NextSightRecoveryAt = 0
 PatrolStep = 1
 NextPatrolMoveAt = 0
+VanilBragiBuffUntil = 0
+VanilServiceBuffUntil = 0
+VanilBragiProviders = {}
+VanilServiceProviders = {}
+VanilCurrentBragiProvider = 0
+VanilCurrentServiceProvider = 0
+VanilSongSeekingKind = ""
+VanilSongSeekingTarget = 0
+VanilSongMoveX = 0
+VanilSongMoveY = 0
+VanilSongNextMoveAt = 0
 PatrolStuckSince = 0
 PatrolRetryCount = 0
 PatrolLastPosX = -1
@@ -477,6 +522,10 @@ function TurretStayActive()
 	return AnchorEnabled == 1 and TurretStayOnCellEnabled()
 end
 
+function NoKSEnabled()
+	return TargetLists.Runtime == nil or TargetLists.Runtime.NoKS ~= false
+end
+
 function AntiStuckEnabled()
 	return TargetLists.Runtime == nil or TargetLists.Runtime.AntiStuckEnabled == true
 end
@@ -518,7 +567,24 @@ function IsValidAttackTargetForCurrentPurpose(target)
 	return IsValidTarget(target) or IsOwnerProtectionAttackTarget(target)
 end
 
+function IsOtherPlayerControlledActor(actor)
+	if actor == 0 or actor == MyID or actor == GetV(V_OWNER, MyID) then
+		return false
+	end
+
+	local actorOwner = GetV(V_OWNER, actor)
+	if actorOwner ~= 0 and actorOwner ~= GetV(V_OWNER, MyID) then
+		return true
+	end
+
+	return IsMonster(actor) ~= 1
+end
+
 function IsKSTarget(target)
+	if NoKSEnabled() == false then
+		return false
+	end
+
 	if target == 0 or IsValidTarget(target) == false then
 		return false
 	end
@@ -529,16 +595,14 @@ function IsKSTarget(target)
 
 	if chasing ~= 0 and chasing ~= MyID and chasing ~= owner then
 		for _, actor in ipairs(actors) do
-			if actor == chasing and IsMonster(actor) ~= 1 then
+			if actor == chasing and IsOtherPlayerControlledActor(actor) then
 				return true
 			end
 		end
 	end
 
 	for _, actor in ipairs(actors) do
-		if actor ~= MyID
-			and actor ~= owner
-			and IsMonster(actor) ~= 1
+		if IsOtherPlayerControlledActor(actor)
 			and GetV(V_TARGET, actor) == target then
 			return true
 		end
@@ -1117,25 +1181,123 @@ function MeetsFilirSupportSPThreshold(skillName)
 	return currentPercent >= minPercent
 end
 
-function GetTargetSkillMode(id)
+function GetTargetSkillCount(id)
 	local tactic = GetMonsterTactic(id)
 	if tactic == nil then
 		if CapriceEnabledByDefault() then
-			return "Max Skills"
+			return 999
 		end
 
-		return "No Skill"
+		return 0
 	end
 
-	return NormalizeSkillModeValue(tactic.Skill)
+	return NormalizeSkillCountValue(tactic.Skill)
+end
+
+function ParseTacticPriorityValue(value)
+	local priority = string.lower(tostring(value or ""))
+	if priority == "first" or priority == "normal" or priority == "last" then
+		return priority
+	end
+
+	return ""
+end
+
+function SplitLegacyBehaviorAndPriority(value)
+	local behavior = string.lower(tostring(value or ""))
+	if behavior == "slepe first" then
+		return "slepe mode", "first"
+	elseif behavior == "slepe last" then
+		return "slepe mode", "last"
+	elseif behavior == "slepe mode" or behavior == "slepe" then
+		return "slepe mode", "normal"
+	elseif behavior == "snipe first" then
+		return "snipe", "first"
+	elseif behavior == "snipe last" then
+		return "snipe", "last"
+	elseif behavior == "snipe" then
+		return "snipe", "normal"
+	elseif behavior == "attack first" then
+		return "attack", "first"
+	elseif behavior == "attack last" then
+		return "attack", "last"
+	elseif behavior == "attack" then
+		return "attack", "normal"
+	elseif behavior == "react first" then
+		return "react", "first"
+	elseif behavior == "react last" then
+		return "react", "last"
+	elseif behavior == "react" then
+		return "react", "normal"
+	elseif behavior == "avoid" then
+		return "avoid", "normal"
+	elseif behavior == "kite attack" then
+		return "kite attack", "normal"
+	elseif behavior == "kite no attack" then
+		return "kite no attack", "normal"
+	end
+
+	return "", ""
+end
+
+function NormalizeTacticBaseBehavior(value)
+	local behavior = string.lower(tostring(value or ""))
+	if behavior == "slepe" then
+		return "slepe mode"
+	elseif behavior == "slepe mode"
+		or behavior == "snipe"
+		or behavior == "avoid"
+		or behavior == "kite attack"
+		or behavior == "kite no attack"
+		or behavior == "attack"
+		or behavior == "react" then
+		return behavior
+	end
+
+	local legacyBehavior = SplitLegacyBehaviorAndPriority(behavior)
+	return legacyBehavior
+end
+
+function CombineTacticBehaviorAndPriority(behavior, priority)
+	behavior = NormalizeTacticBaseBehavior(behavior)
+	if behavior == "" then
+		return ""
+	end
+
+	if behavior == "avoid" or behavior == "kite attack" or behavior == "kite no attack" then
+		return behavior
+	end
+
+	priority = ParseTacticPriorityValue(priority)
+	if priority == "first" then
+		if behavior == "slepe mode" then
+			return "slepe first"
+		end
+		return behavior .. " first"
+	elseif priority == "last" then
+		if behavior == "slepe mode" then
+			return "slepe last"
+		end
+		return behavior .. " last"
+	end
+
+	return behavior
 end
 
 function GetTargetBehavior(id)
 	local tactic = GetMonsterTactic(id)
 	if tactic ~= nil then
-		local behavior = string.lower(tostring(tactic.Behavior or ""))
+		local legacyBehavior, legacyPriority = SplitLegacyBehaviorAndPriority(tactic.Behavior)
+		local behavior = NormalizeTacticBaseBehavior(tactic.Behavior)
+		local priority = ParseTacticPriorityValue(tactic.Priority)
+		if behavior == "" then
+			behavior = legacyBehavior
+		end
+		if priority == "" then
+			priority = legacyPriority
+		end
 		if behavior ~= "" then
-			return NormalizeBehaviorForHomunculus(behavior)
+			return NormalizeBehaviorForHomunculus(CombineTacticBehaviorAndPriority(behavior, priority))
 		end
 	end
 
@@ -1454,7 +1616,7 @@ function GetAttackBehaviorPriority(target)
 		end
 		return -1
 	elseif behavior == "slepe first" then
-		return 850
+		return 800
 	elseif behavior == "attack first" then
 		return 800
 	elseif behavior == "react" then
@@ -1468,7 +1630,7 @@ function GetAttackBehaviorPriority(target)
 		end
 		return -1
 	elseif behavior == "slepe last" then
-		return 250
+		return 200
 	elseif behavior == "attack last" then
 		return 200
 	end
@@ -1493,9 +1655,9 @@ function GetSkillBehaviorPriority(target)
 		end
 		return -1
 	elseif behavior == "snipe first" then
-		return 850
+		return 800
 	elseif behavior == "slepe first" then
-		return 825
+		return 800
 	elseif behavior == "attack first" then
 		return 800
 	elseif behavior == "react" then
@@ -1504,16 +1666,16 @@ function GetSkillBehaviorPriority(target)
 		end
 		return -1
 	elseif behavior == "snipe" then
-		return 650
+		return 600
 	elseif behavior == "react last" then
 		if IsReactiveBehaviorTarget(target) then
 			return 300
 		end
 		return -1
 	elseif behavior == "snipe last" then
-		return 250
+		return 200
 	elseif behavior == "slepe last" then
-		return 225
+		return 200
 	elseif behavior == "attack last" then
 		return 200
 	end
@@ -1704,8 +1866,41 @@ function UpdateFilirSupportAttemptState()
 	end
 end
 
-function GetSkillCastCount(id)
+function GetConfirmedSkillCastCount(id)
 	return SkillCastCount[id] or 0
+end
+
+function CleanupSkillCastReservations(id)
+	if id == 0 or SkillCastReservations[id] == nil then
+		return
+	end
+
+	local now = GetTick()
+	local kept = {}
+	for _, expiresAt in ipairs(SkillCastReservations[id]) do
+		if expiresAt > now then
+			table.insert(kept, expiresAt)
+		end
+	end
+
+	if #kept == 0 then
+		SkillCastReservations[id] = nil
+	else
+		SkillCastReservations[id] = kept
+	end
+end
+
+function GetReservedSkillCastCount(id)
+	CleanupSkillCastReservations(id)
+	if SkillCastReservations[id] == nil then
+		return 0
+	end
+
+	return #SkillCastReservations[id]
+end
+
+function GetSkillCastCount(id)
+	return GetConfirmedSkillCastCount(id) + GetReservedSkillCastCount(id)
 end
 
 function GetSkillCastCountByClass(id)
@@ -1713,9 +1908,67 @@ function GetSkillCastCountByClass(id)
 	return SkillCastCountByClass[class] or 0
 end
 
+function ReserveSkillCast(id)
+	if id == 0 then
+		return
+	end
+
+	CleanupSkillCastReservations(id)
+	if SkillCastReservations[id] == nil then
+		SkillCastReservations[id] = {}
+	end
+
+	-- Short guard against rapid duplicate SkillObject calls while the server catches up.
+	table.insert(SkillCastReservations[id], GetTick() + SKILL_RESERVATION_MS)
+end
+
+function ClearSkillCastReservations(id)
+	if id ~= 0 then
+		SkillCastReservations[id] = nil
+	end
+end
+
+function LatchOneSkillAttempt(id)
+	if id ~= 0 and GetTargetSkillCount(id) == 1 then
+		OneSkillAttemptLatch[id] = GetTick() + ONE_SKILL_ATTEMPT_LOCK_MS
+	end
+end
+
+function ClearOneSkillAttemptLatch(id)
+	if id ~= 0 then
+		OneSkillAttemptLatch[id] = nil
+	end
+end
+
+function HasOneSkillAttemptLatch(id)
+	if id == 0 or OneSkillAttemptLatch[id] == nil then
+		return false
+	end
+
+	if OneSkillAttemptLatch[id] <= GetTick() then
+		OneSkillAttemptLatch[id] = nil
+		return false
+	end
+
+	return true
+end
+
+function ConsumeSkillCastReservation(id)
+	if id == 0 or SkillCastReservations[id] == nil then
+		return
+	end
+
+	table.remove(SkillCastReservations[id], 1)
+	if #SkillCastReservations[id] == 0 then
+		SkillCastReservations[id] = nil
+	end
+end
+
 function MarkSkillCast(id)
 	if id ~= 0 then
-		SkillCastCount[id] = GetSkillCastCount(id) + 1
+		ConsumeSkillCastReservation(id)
+		ClearOneSkillAttemptLatch(id)
+		SkillCastCount[id] = GetConfirmedSkillCastCount(id) + 1
 		local class = MonsterClass(id)
 		SkillCastCountByClass[class] = GetSkillCastCountByClass(id) + 1
 	end
@@ -1725,13 +1978,25 @@ function SlepeModeDisallowsSkillAfterAttack(id)
 	return UsesSlepeCurrentTargetSkillRule(id) and WasAttacked(id)
 end
 
+function TargetHasPendingSkillAttempt(id)
+	return GetReservedSkillCastCount(id) > 0
+end
+
 function TargetAllowsSkill(id, allowSlepeAfterAttack)
 	if TargetUsesKiteNoAttackBehavior(id) then
 		return false
 	end
 
-	local skillMode = GetTargetSkillMode(id)
-	if skillMode == "No Skill" then
+	local skillCount = GetTargetSkillCount(id)
+	if skillCount <= 0 then
+		return false
+	end
+
+	if TargetHasPendingSkillAttempt(id) then
+		return false
+	end
+
+	if skillCount == 1 and HasOneSkillAttemptLatch(id) then
 		return false
 	end
 
@@ -1741,13 +2006,7 @@ function TargetAllowsSkill(id, allowSlepeAfterAttack)
 		return false
 	end
 
-	if skillMode == "One Skill" then
-		return GetSkillCastCount(id) < 1
-	elseif skillMode == "Two Skills" then
-		return GetSkillCastCount(id) < 2
-	end
-
-	return true
+	return GetSkillCastCount(id) < skillCount
 end
 
 function HasTacticRepeatSkillMode(id)
@@ -1756,8 +2015,7 @@ function HasTacticRepeatSkillMode(id)
 		return false
 	end
 
-	local skillMode = NormalizeSkillModeValue(tactic.Skill)
-	return skillMode == "Two Skills" or skillMode == "Max Skills"
+	return NormalizeSkillCountValue(tactic.Skill) >= 2
 end
 
 function AllowsRepeatSkillOnCurrentTarget(id)
@@ -1774,24 +2032,28 @@ function TargetAllowsSlepeCurrentTargetFallbackSkill(id)
 		return false
 	end
 
-	local skillMode = GetTargetSkillMode(id)
-	if skillMode == "No Skill" then
+	local skillCount = GetTargetSkillCount(id)
+	if skillCount <= 0 then
+		return false
+	end
+
+	if TargetHasPendingSkillAttempt(id) then
+		return false
+	end
+
+	if skillCount == 1 and HasOneSkillAttemptLatch(id) then
 		return false
 	end
 
 	if HasTacticRepeatSkillMode(id) then
-		if skillMode == "Two Skills" then
-			return GetSkillCastCount(id) < 2
-		end
-
-		return true
+		return GetSkillCastCount(id) < skillCount
 	end
 
 	if WasAttacked(id) then
 		return false
 	end
 
-	return GetSkillCastCount(id) < 1
+	return GetSkillCastCount(id) < skillCount
 end
 
 function UsesSlepeCurrentTargetSkillRule(id)
@@ -1818,6 +2080,28 @@ function ShouldUseSlepeChaseOpenerSkill(id)
 		and AttackTargetHit == 0
 		and UsesSlepeCurrentTargetSkillRule(id)
 		and WasAttacked(id) == false
+end
+
+function ShouldForceVanilSlepeSideTarget()
+	return IsFilir(MyID) == false
+		and AttackTarget ~= 0
+		and UsesSlepeCurrentTargetSkillRule(AttackTarget)
+end
+
+function IsCurrentTargetLockedForSkills(id)
+	return id ~= 0
+		and id == AttackTarget
+		and UsesSlepeCurrentTargetSkillRule(id) == false
+end
+
+function IsCurrentAttackTargetValidForSkill(skillID)
+	return AttackTarget ~= 0
+		and IsValidTarget(AttackTarget)
+		and IsIgnoredTarget(AttackTarget) == false
+		and IsKSTarget(AttackTarget) == false
+		and IsTargetInActiveRange(AttackTarget)
+		and TargetUsesAvoidBehavior(AttackTarget) == false
+		and OffensiveSkillInRange(AttackTarget, skillID, GetTargetSkillLevel(AttackTarget))
 end
 
 function HandlePostSkillPrimaryTarget(target, ignoreTarget)
@@ -2421,6 +2705,7 @@ function TryCastFilirSupportSkill(skillName, skillID)
 	PendingFilirSupportName = skillName
 	PendingFilirSupportCost = spCost
 	PendingFilirSupportDelayMs = GetFilirSupportDelayMs(skillName, level)
+	SetNextFilirSupportAttempt(skillName, PendingFilirSupportAt + FILIR_SUPPORT_RETRY_MS)
 	return MyID
 end
 
@@ -2565,6 +2850,278 @@ function HandleManualCapricePriority()
 	return true
 end
 
+function GetVanilSongProviders(kind)
+	if kind == "Bragi" then
+		return VanilBragiProviders
+	end
+
+	return VanilServiceProviders
+end
+
+function GetVanilCurrentSongProvider(kind)
+	if kind == "Bragi" then
+		return VanilCurrentBragiProvider
+	end
+
+	return VanilCurrentServiceProvider
+end
+
+function SetVanilCurrentSongProvider(kind, provider)
+	if kind == "Bragi" then
+		VanilCurrentBragiProvider = provider
+	else
+		VanilCurrentServiceProvider = provider
+	end
+end
+
+function GetVanilSongBuffUntil(kind)
+	if kind == "Bragi" then
+		return VanilBragiBuffUntil
+	end
+
+	return VanilServiceBuffUntil
+end
+
+function SetVanilSongBuffUntil(kind, value)
+	if kind == "Bragi" then
+		VanilBragiBuffUntil = value
+	else
+		VanilServiceBuffUntil = value
+	end
+end
+
+function VanilNeedsSongBuff(kind)
+	return GetVanilSongBuffUntil(kind) <= GetTick()
+end
+
+function ResetVanilSongSeekIfTarget(target)
+	if VanilSongSeekingTarget == target then
+		VanilSongSeekingKind = ""
+		VanilSongSeekingTarget = 0
+		VanilSongMoveX = 0
+		VanilSongMoveY = 0
+		VanilSongNextMoveAt = 0
+	end
+end
+
+function UpdateVanilSongBuffTimers()
+	local now = GetTick()
+	if VanilBragiBuffUntil ~= 0 and now >= VanilBragiBuffUntil then
+		VanilBragiBuffUntil = 0
+	end
+
+	if VanilServiceBuffUntil ~= 0 and now >= VanilServiceBuffUntil then
+		VanilServiceBuffUntil = 0
+	end
+end
+
+function CleanupVanilSongProviders(kind)
+	local providers = GetVanilSongProviders(kind)
+	local now = GetTick()
+	for provider, info in pairs(providers) do
+		local x, y = GetV(V_POSITION, provider)
+		if x == -1 or y == -1 or tonumber(info.songEndTime or 0) <= now then
+			providers[provider] = nil
+			if GetVanilCurrentSongProvider(kind) == provider then
+				SetVanilCurrentSongProvider(kind, 0)
+			end
+			ResetVanilSongSeekIfTarget(provider)
+		end
+	end
+end
+
+function RememberVanilSongProvider(kind, actor)
+	local x, y = GetV(V_POSITION, actor)
+	if x == -1 or y == -1 then
+		return
+	end
+
+	local providers = GetVanilSongProviders(kind)
+	if providers[actor] == nil then
+		providers[actor] = {}
+	end
+
+	providers[actor].lastSeen = GetTick()
+	providers[actor].songEndTime = GetTick() + VANIL_SONG_PROVIDER_ACTIVE_MS
+end
+
+function ScanVanilSongProviders()
+	CleanupVanilSongProviders("Bragi")
+	CleanupVanilSongProviders("Service")
+
+	local owner = GetV(V_OWNER, MyID)
+	local actors = GetActors()
+	for _, actor in ipairs(actors) do
+		if actor ~= MyID and actor ~= owner and IsMonster(actor) ~= 1 then
+			local motion = GetV(V_MOTION, actor)
+			if motion == MOTION_PERFORM then
+				RememberVanilSongProvider("Bragi", actor)
+			elseif motion == MOTION_DANCE then
+				RememberVanilSongProvider("Service", actor)
+			end
+		end
+	end
+end
+
+function IsVanilSongProviderVisible(provider, info)
+	local x, y = GetV(V_POSITION, provider)
+	if x == -1 or y == -1 then
+		return false
+	end
+
+	if tonumber(info.songEndTime or 0) <= GetTick() then
+		return false
+	end
+
+	local distance = DistanceToActor(MyID, provider)
+	return distance ~= -1 and distance <= VANIL_SONG_SEARCH_RANGE
+end
+
+function FindVanilSongProvider(kind)
+	local providers = GetVanilSongProviders(kind)
+	local currentProvider = GetVanilCurrentSongProvider(kind)
+	if currentProvider ~= 0
+		and providers[currentProvider] ~= nil
+		and IsVanilSongProviderVisible(currentProvider, providers[currentProvider]) then
+		return currentProvider
+	end
+
+	local bestProvider = 0
+	local bestDistance = 999
+	for provider, info in pairs(providers) do
+		if IsVanilSongProviderVisible(provider, info) then
+			local distance = DistanceToActor(MyID, provider)
+			if distance ~= -1 and distance < bestDistance then
+				bestProvider = provider
+				bestDistance = distance
+			end
+		end
+	end
+
+	return bestProvider
+end
+
+function FindNeededVanilSongProvider()
+	if VanilNeedsSongBuff("Bragi") then
+		local provider = FindVanilSongProvider("Bragi")
+		if provider ~= 0 then
+			return "Bragi", provider
+		end
+	end
+
+	if VanilNeedsSongBuff("Service") then
+		local provider = FindVanilSongProvider("Service")
+		if provider ~= 0 then
+			return "Service", provider
+		end
+	end
+
+	return "", 0
+end
+
+function MarkVanilSongBuff(kind, provider)
+	SetVanilSongBuffUntil(kind, GetTick() + VANIL_SONG_BUFF_DURATION_MS)
+	SetVanilCurrentSongProvider(kind, provider)
+	ResetVanilSongSeekIfTarget(provider)
+
+	local providers = GetVanilSongProviders(kind)
+	if providers[provider] == nil then
+		providers[provider] = {}
+	end
+	providers[provider].lastBuffed = GetTick()
+	providers[provider].songEndTime = GetTick() + VANIL_SONG_PROVIDER_ACTIVE_MS
+end
+
+function GetVanilSongApproachCell(provider)
+	local myX, myY = GetV(V_POSITION, MyID)
+	local songX, songY = GetV(V_POSITION, provider)
+	if myX == -1 or songX == -1 then
+		return -1, -1
+	end
+
+	local bestX, bestY = -1, -1
+	local bestDistance = 999
+	for dx = -VANIL_SONG_BUFF_RANGE, VANIL_SONG_BUFF_RANGE do
+		for dy = -VANIL_SONG_BUFF_RANGE, VANIL_SONG_BUFF_RANGE do
+			local candidateX = songX + dx
+			local candidateY = songY + dy
+			if Distance(candidateX, candidateY, songX, songY) <= VANIL_SONG_BUFF_RANGE
+				and (candidateX ~= songX or candidateY ~= songY)
+				and IsCellOccupiedByOther(candidateX, candidateY, 0) == false then
+				local candidateDistance = Distance(myX, myY, candidateX, candidateY)
+				if candidateDistance ~= -1 and candidateDistance < bestDistance then
+					bestX = candidateX
+					bestY = candidateY
+					bestDistance = candidateDistance
+				end
+			end
+		end
+	end
+
+	if bestX ~= -1 then
+		return bestX, bestY
+	end
+
+	local adjacentX, adjacentY, adjacentDistance = GetNearestOpenAdjacentPoint(songX, songY, provider)
+	if adjacentDistance ~= 999 then
+		return adjacentX, adjacentY
+	end
+
+	return myX, myY
+end
+
+function HandleVanilSongPriority()
+	if IsVanilmirth(MyID) == false then
+		return false
+	end
+
+	UpdateVanilSongBuffTimers()
+	ScanVanilSongProviders()
+
+	local kind, provider = FindNeededVanilSongProvider()
+	if provider == 0 then
+		VanilSongSeekingKind = ""
+		VanilSongSeekingTarget = 0
+		return false
+	end
+
+	CancelSoftStandbyReset()
+	CancelPostSkillWait()
+	ClearAttackTarget()
+
+	local distance = DistanceToActor(MyID, provider)
+	if distance ~= -1 and distance <= VANIL_SONG_BUFF_RANGE then
+		MarkVanilSongBuff(kind, provider)
+		CurrentState = STATE_IDLE
+		return true
+	end
+
+	local nextX, nextY = GetVanilSongApproachCell(provider)
+	if nextX ~= -1 and nextY ~= -1 then
+		local myX, myY = GetV(V_POSITION, MyID)
+		if nextX == myX and nextY == myY and (distance == -1 or distance > VANIL_SONG_BUFF_RANGE) then
+			return false
+		end
+
+		if GetTick() >= VanilSongNextMoveAt
+			or VanilSongSeekingTarget ~= provider
+			or VanilSongMoveX ~= nextX
+			or VanilSongMoveY ~= nextY
+			or GetV(V_MOTION, MyID) ~= MOTION_MOVE then
+			ForceMoveTo(nextX, nextY)
+			VanilSongMoveX = nextX
+			VanilSongMoveY = nextY
+			VanilSongNextMoveAt = GetTick() + VANIL_SONG_REPATH_MS
+		end
+
+		VanilSongSeekingKind = kind
+		VanilSongSeekingTarget = provider
+		CurrentState = STATE_MOVE
+	end
+
+	return true
+end
+
 function UpdateCapriceAttemptState()
 	if PendingCapriceAt == 0 then
 		return
@@ -2572,7 +3129,21 @@ function UpdateCapriceAttemptState()
 
 	local sp = GetV(V_SP, MyID)
 	if PendingCapriceSP - sp >= PendingCapriceCost then
-		MarkSkillCast(PendingCapriceTarget)
+		local confirmedCasts = 1
+		if PendingCapriceCost > 0 then
+			confirmedCasts = math.floor((PendingCapriceSP - sp) / PendingCapriceCost)
+			if confirmedCasts < 1 then
+				confirmedCasts = 1
+			end
+		end
+		local reservedCasts = GetReservedSkillCastCount(PendingCapriceTarget)
+		if reservedCasts > 0 and confirmedCasts > reservedCasts then
+			confirmedCasts = reservedCasts
+		end
+		for i = 1, confirmedCasts do
+			MarkSkillCast(PendingCapriceTarget)
+		end
+		ClearSkillCastReservations(PendingCapriceTarget)
 		if PendingCapriceTarget == ManualCapriceTarget then
 			ClearManualCapriceTarget()
 		end
@@ -3425,6 +3996,8 @@ function IssueOffensiveSkillOnTarget(skillTarget, skillLevel)
 
 	local spBefore = GetV(V_SP, MyID)
 	SkillObject(MyID, skillLevel, skillID, skillTarget)
+	LatchOneSkillAttempt(skillTarget)
+	ReserveSkillCast(skillTarget)
 	if IsFilir(MyID) then
 		NextCapriceTryAt = GetTick() + FILIR_OFFENSIVE_RETRY_MS
 	else
@@ -3474,14 +4047,26 @@ function TryCastCaprice()
 		skillTarget = manualTarget
 	end
 
-	if manualTarget == 0 then
+	if manualTarget == 0
+		and IsCurrentTargetLockedForSkills(AttackTarget) then
+		if IsCurrentAttackTargetValidForSkill(skillID)
+			and TargetAllowsSkill(AttackTarget, true) then
+			skillTarget = AttackTarget
+		else
+			return 0
+		end
+	end
+
+	if manualTarget == 0 and IsCurrentTargetLockedForSkills(AttackTarget) == false then
+		local forceVanilSlepeSideTarget = ShouldForceVanilSlepeSideTarget()
 		local sideTarget = FindMonsterInSkillRange(excludedTarget)
 		if SkillTargetBeats(sideTarget, skillTarget) then
 			skillTarget = sideTarget
 		end
 
 		local currentTarget = 0
-		if AttackTarget ~= 0
+		if forceVanilSlepeSideTarget == false
+			and AttackTarget ~= 0
 			and IsValidTarget(AttackTarget)
 			and IsIgnoredTarget(AttackTarget) == false
 			and IsKSTarget(AttackTarget) == false
@@ -3537,7 +4122,9 @@ function TryCastCaprice()
 		return 0
 	end
 
-	if manualTarget == 0 and SkillTargetCanPreemptAttackWork(skillTarget) == false then
+	if manualTarget == 0
+		and IsCurrentTargetLockedForSkills(skillTarget) == false
+		and SkillTargetCanPreemptAttackWork(skillTarget) == false then
 		return 0
 	end
 
@@ -3604,6 +4191,10 @@ function TryCastFilirContactMoonlight()
 	end
 
 	ResetPathingProbe()
+	if ResumeFilirAttackAfterOffensiveSkill(castTarget) == 1 then
+		return 1
+	end
+
 	CurrentState = STATE_ATTACK
 	return 1
 end
@@ -3834,6 +4425,85 @@ function TryFilirAttackFallback()
 	return 1
 end
 
+function ShouldFilirHoldForRepeatSkill(target)
+	if IsFilir(MyID) == false
+		or target == 0
+		or target ~= AttackTarget
+		or HasTacticRepeatSkillMode(target) == false
+		or IsValidAttackTargetForCurrentPurpose(target) == false
+		or IsIgnoredTarget(target)
+		or IsKSTarget(target)
+		or IsTargetInActiveRange(target) == false
+		or TargetUsesAvoidBehavior(target)
+		or TargetUsesSnipeBehavior(target) then
+		return false
+	end
+
+	local skillID = GetOffensiveSkillID()
+	local skillLevel = GetTargetSkillLevel(target)
+	if skillID == 0
+		or HasEnoughSPForOffensiveSkill(skillLevel) == false
+		or OffensiveSkillInRange(target, skillID, skillLevel) == false then
+		return false
+	end
+
+	return GetSkillCastCount(target) < GetTargetSkillCount(target)
+end
+
+function TryImmediateFilirCombatHandoff()
+	if IsFilir(MyID) == false
+		or AttackTarget == 0
+		or IsValidAttackTargetForCurrentPurpose(AttackTarget) == false
+		or TargetUsesSnipeBehavior(AttackTarget) then
+		return 0
+	end
+
+	if TryFilirAttackFallback() == 1 then
+		return 1
+	end
+
+	if TryStickyAttackCommand() == 1 then
+		if AttackTarget ~= 0 then
+			CurrentState = STATE_ATTACK
+		end
+		return 1
+	end
+
+	ForceAttackChaseMovement()
+	CurrentState = STATE_CHASE_ATTACK
+	return 1
+end
+
+function ResumeFilirAttackAfterOffensiveSkill(castTarget)
+	if IsFilir(MyID) == false
+		or castTarget == 0
+		or AttackTarget == 0
+		or castTarget ~= AttackTarget then
+		return 0
+	end
+
+	if TargetUsesSnipeBehavior(AttackTarget)
+		or IsValidAttackTargetForCurrentPurpose(AttackTarget) == false then
+		return 0
+	end
+
+	local distance = DistanceToActor(MyID, AttackTarget)
+	if distance == -1 or distance > AttackRange() then
+		CurrentState = STATE_CHASE_ATTACK
+		return 0
+	end
+
+	ResetPathingProbe()
+	Attack(MyID, AttackTarget)
+	NextAttackCommandAt = GetTick() + ATTACK_REISSUE_MS
+	AttackTargetHit = 1
+	HandlePostNormalAttack(AttackTarget)
+	if AttackTarget ~= 0 then
+		CurrentState = STATE_ATTACK
+	end
+	return 1
+end
+
 function TryAttackRefreshStep()
 	if DanceAttackEnabled() == false then
 		return 0
@@ -3861,7 +4531,7 @@ function TryAttackRefreshStep()
 		return 0
 	end
 
-	if DanceMovingOnly() and IsTargetActuallyMoving(AttackTarget) == false then
+	if everyAttack == false and DanceMovingOnly() and IsTargetActuallyMoving(AttackTarget) == false then
 		return 0
 	end
 
@@ -4601,6 +5271,8 @@ function TickChaseAttack()
 		AcquireAttackTarget()
 		if AttackTarget == 0 then
 			CurrentState = STATE_IDLE
+		elseif TryImmediateFilirCombatHandoff() == 1 then
+			return
 		end
 		return
 	end
@@ -4621,9 +5293,24 @@ function TickChaseAttack()
 	if castTarget ~= 0 then
 		ResetPathingProbe()
 		if IsFilir(MyID) then
+			if ShouldFilirHoldForRepeatSkill(castTarget) then
+				CurrentState = STATE_ATTACK
+				return
+			end
+			if ResumeFilirAttackAfterOffensiveSkill(castTarget) == 1 then
+				return
+			end
+			if TryImmediateFilirCombatHandoff() == 1 then
+				return
+			end
+
 			CurrentState = STATE_ATTACK
 			return
 		end
+	end
+
+	if ShouldFilirHoldForRepeatSkill(AttackTarget) then
+		return
 	end
 
 	if TryFilirAttackFallback() == 1 then
@@ -4718,6 +5405,8 @@ function TickAttack()
 		AcquireAttackTarget()
 		if AttackTarget == 0 then
 			CurrentState = STATE_IDLE
+		elseif TryImmediateFilirCombatHandoff() == 1 then
+			return
 		end
 		return
 	end
@@ -4738,9 +5427,24 @@ function TickAttack()
 	if castTarget ~= 0 then
 		ResetPathingProbe()
 		if IsFilir(MyID) then
+			if ShouldFilirHoldForRepeatSkill(castTarget) then
+				CurrentState = STATE_ATTACK
+				return
+			end
+			if ResumeFilirAttackAfterOffensiveSkill(castTarget) == 1 then
+				return
+			end
+			if TryImmediateFilirCombatHandoff() == 1 then
+				return
+			end
+
 			CurrentState = STATE_ATTACK
 			return
 		end
+	end
+
+	if ShouldFilirHoldForRepeatSkill(AttackTarget) then
+		return
 	end
 
 	if TryFilirAttackFallback() == 1 then
@@ -5247,6 +5951,14 @@ function AI(myid)
 	end
 
 	if HandleManualCapricePriority() then
+		local actors = GetActors()
+		for _, actor in ipairs(actors) do
+			RememberActorPosition(actor)
+		end
+		return
+	end
+
+	if HandleVanilSongPriority() then
 		local actors = GetActors()
 		for _, actor in ipairs(actors) do
 			RememberActorPosition(actor)
