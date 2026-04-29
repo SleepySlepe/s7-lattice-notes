@@ -123,6 +123,19 @@ function ClampRuntimeMs(value, defaultValue, minimumValue, maximumValue)
 	return math.floor(number)
 end
 
+function NormalizeKSModeValue(value)
+	local mode = string.lower(tostring(value or ""))
+	if mode == "no ks" or mode == "noks" or mode == "no_ks" then
+		return "no ks"
+	elseif mode == "first attack" or mode == "first_attack" or mode == "firstattack" then
+		return "first attack"
+	elseif mode == "full ks" or mode == "full_ks" or mode == "fullks" then
+		return "full ks"
+	end
+
+	return ""
+end
+
 function EnsureRuntimeDefaults()
 	if type(TargetLists.Runtime) ~= "table" then
 		TargetLists.Runtime = {}
@@ -140,11 +153,16 @@ function EnsureRuntimeDefaults()
 		TargetLists.Runtime.TurretStayOnCell = TargetLists.Runtime.TurretStayOnCell == true
 	end
 
-	if TargetLists.Runtime.NoKS == nil then
-		TargetLists.Runtime.NoKS = true
-	else
-		TargetLists.Runtime.NoKS = TargetLists.Runtime.NoKS == true
+	local ksMode = NormalizeKSModeValue(TargetLists.Runtime.KSMode)
+	if ksMode == "" then
+		if TargetLists.Runtime.NoKS == nil or TargetLists.Runtime.NoKS == true then
+			ksMode = "no ks"
+		else
+			ksMode = "full ks"
+		end
 	end
+	TargetLists.Runtime.KSMode = ksMode
+	TargetLists.Runtime.NoKS = ksMode == "no ks"
 
 	if TargetLists.Runtime.AntiStuckEnabled == nil then
 		TargetLists.Runtime.AntiStuckEnabled = true
@@ -215,6 +233,19 @@ function NormalizeSkillCountValue(value)
 	end
 
 	return 999
+end
+
+function NormalizeKSModeValue(value)
+	local mode = string.lower(tostring(value or ""))
+	if mode == "no ks" or mode == "noks" or mode == "no_ks" then
+		return "no ks"
+	elseif mode == "first attack" or mode == "first_attack" or mode == "firstattack" then
+		return "first attack"
+	elseif mode == "full ks" or mode == "full_ks" or mode == "fullks" then
+		return "full ks"
+	end
+
+	return ""
 end
 
 function NormalizeListEntries(source)
@@ -308,6 +339,7 @@ CHASE_REPATH_DISTANCE = 2
 ATTACK_STICKY_EXTRA_RANGE = 2
 ATTACK_REISSUE_MS = 150
 ATTACK_LATCH_GRACE_MS = 150
+ATTACK_TARGET_COMMIT_MS = 700
 DANCE_MOVE_MS = TargetLists.Runtime.DanceMoveMs
 DANCE_ATTACK_BUFFER_MS = 120
 STUCK_STAND_MS = TargetLists.Runtime.AntiStuckMs
@@ -377,6 +409,7 @@ ManualCapriceSkill = 0
 NextChaseRepathAt = 0
 NextAttackCommandAt = 0
 NextAttackRefreshMoveAt = 0
+AttackTargetCommittedUntil = 0
 NextDanceMoveAt = 0
 DANCE_SIDE = 1
 StandStillSince = 0
@@ -398,6 +431,7 @@ AnchorX = 0
 AnchorY = 0
 PendingCommands = Queue.new()
 AttackedMob = {}
+FirstAttackClaimedMob = {}
 ProtectedMob = {}
 KiteNoAttackDone = {}
 SkillCastCount = {}
@@ -523,7 +557,32 @@ function TurretStayActive()
 end
 
 function NoKSEnabled()
-	return TargetLists.Runtime == nil or TargetLists.Runtime.NoKS ~= false
+	return GetKSMode() == "no ks"
+end
+
+function GetKSMode()
+	if TargetLists.Runtime == nil then
+		return "no ks"
+	end
+
+	local mode = NormalizeKSModeValue(TargetLists.Runtime.KSMode)
+	if mode ~= "" then
+		return mode
+	end
+
+	if TargetLists.Runtime.NoKS == false then
+		return "full ks"
+	end
+
+	return "no ks"
+end
+
+function FirstAttackKSModeEnabled()
+	return GetKSMode() == "first attack"
+end
+
+function FullKSEnabled()
+	return GetKSMode() == "full ks"
 end
 
 function AntiStuckEnabled()
@@ -580,11 +639,7 @@ function IsOtherPlayerControlledActor(actor)
 	return IsMonster(actor) ~= 1
 end
 
-function IsKSTarget(target)
-	if NoKSEnabled() == false then
-		return false
-	end
-
+function IsKSContestedByOthers(target)
 	if target == 0 or IsValidTarget(target) == false then
 		return false
 	end
@@ -609,6 +664,28 @@ function IsKSTarget(target)
 	end
 
 	return false
+end
+
+function WasFirstAttackClaimed(id)
+	return FirstAttackClaimedMob[id] == 1
+end
+
+function ClaimFirstAttack(id)
+	if id ~= 0 then
+		FirstAttackClaimedMob[id] = 1
+	end
+end
+
+function IsKSTarget(target)
+	if FullKSEnabled() then
+		return false
+	end
+
+	if FirstAttackKSModeEnabled() and WasFirstAttackClaimed(target) then
+		return false
+	end
+
+	return IsKSContestedByOthers(target)
 end
 
 function IsTargetingOwner(target)
@@ -756,6 +833,7 @@ function ClearAttackTarget()
 	AttackTarget = 0
 	AttackTargetHit = 0
 	NextAttackRefreshMoveAt = 0
+	AttackTargetCommittedUntil = 0
 	if oldAttackTarget ~= 0 then
 		ResetPathingProbe()
 	end
@@ -805,6 +883,23 @@ function IgnorePrimarySkillTarget(id)
 	if id ~= 0 then
 		IgnoreTargetUntil[id] = GetTick() + POST_PRIMARY_SKILL_IGNORE_MS
 	end
+end
+
+function ShouldIgnoreDroppedTargetAfterSwap(target)
+	if target == 0 then
+		return false
+	end
+
+	if GetV(V_MOTION, target) == MOTION_DEAD then
+		return true
+	end
+
+	local x, y = GetV(V_POSITION, target)
+	if x == -1 or y == -1 then
+		return true
+	end
+
+	return false
 end
 
 function IsIgnoredTarget(id)
@@ -887,11 +982,12 @@ function CheckTargetPathingFailure(target)
 		return false
 	end
 
-	if GetTick() - PathProbeStartedAt < CHASE_PROGRESS_CHECK_MS then
+	if GetTick() - PathProbeStartedAt < GetTargetPathingFailureTimeoutMs(target, distance) then
 		return false
 	end
 
-	if ShouldKeepCurrentTargetThroughRecovery(target) then
+	if ShouldKeepCurrentTargetThroughRecovery(target)
+		or ShouldKeepNearbyTargetThroughRecovery(target, distance) then
 		IgnoreTargetUntil[target] = nil
 		ResetPathingProbe()
 		NextChaseRepathAt = 0
@@ -915,6 +1011,8 @@ function HandlePathingFailureTarget(target)
 	AcquireAttackTarget(target)
 	if AttackTarget == 0 then
 		BeginSoftStandbyReset(1, 1)
+	elseif RedirectAttackAfterTargetSwap(target) == 1 then
+		return
 	end
 end
 
@@ -1459,6 +1557,11 @@ function HandlePostNormalAttack(target)
 	end
 
 	local wasAlreadyAttacked = WasAttacked(target)
+	if wasAlreadyAttacked == false
+		and FirstAttackKSModeEnabled()
+		and IsKSContestedByOthers(target) == false then
+		ClaimFirstAttack(target)
+	end
 	MarkAttacked(target)
 	if IsTargetingOwner(target) then
 		MarkProtected(target)
@@ -1527,6 +1630,51 @@ function IsCommittedToCurrentAttackTarget()
 		or CurrentState == STATE_ATTACK
 		or IsInAttackMotion(MyID)
 		or PendingCapriceTarget == AttackTarget
+end
+
+function GetTargetPathingFailureTimeoutMs(target, distance)
+	local timeoutMs = CHASE_PROGRESS_CHECK_MS
+	if distance == nil or distance == -1 then
+		distance = DistanceToActor(MyID, target)
+	end
+
+	if distance ~= -1 and distance <= StickyAttackRange() then
+		timeoutMs = timeoutMs + 700
+	end
+
+	if IsFilir(MyID)
+		and distance ~= -1
+		and distance <= StationaryRepositionRange() + 1 then
+		timeoutMs = timeoutMs + 900
+	end
+
+	return timeoutMs
+end
+
+function ShouldKeepNearbyTargetThroughRecovery(target, distance)
+	if target == 0
+		or target ~= AttackTarget
+		or IsValidAttackTargetForCurrentPurpose(target) == false
+		or TargetUsesAvoidBehavior(target)
+		or TargetUsesKiteNoAttackBehavior(target)
+		or IsKSTarget(target)
+		or TargetUsesSnipeBehavior(target) then
+		return false
+	end
+
+	if distance == nil or distance == -1 then
+		distance = DistanceToActor(MyID, target)
+	end
+
+	if distance == -1 then
+		return false
+	end
+
+	if distance <= StickyAttackRange() then
+		return true
+	end
+
+	return IsFilir(MyID) and distance <= StationaryRepositionRange() + 1
 end
 
 function ShouldKeepCurrentTargetThroughRecovery(target)
@@ -3171,6 +3319,14 @@ function UpdateCapriceAttemptState()
 	end
 end
 
+function ClearPendingOffensiveSkillAttempt()
+	PendingCapriceAt = 0
+	PendingCapriceSP = 0
+	PendingCapriceTarget = 0
+	PendingCapriceCost = 0
+	PendingCapriceDelayMs = 0
+end
+
 function SetAnchor(x, y)
 	AnchorEnabled = 1
 	AnchorX = x
@@ -3472,6 +3628,11 @@ function EnsureIdleStandby()
 		return false
 	end
 
+	AcquireAttackTarget()
+	if AttackTarget ~= 0 then
+		return EngageFreshAttackTarget(0)
+	end
+
 	if IsAtStandbyCell() then
 		return false
 	end
@@ -3731,6 +3892,7 @@ function TryBreakSoftResetForTarget()
 	if StandbyResetStrict ~= 1 then
 		AcquireAttackTarget()
 		if AttackTarget ~= 0 then
+			EngageFreshAttackTarget(0)
 			CancelSoftStandbyReset()
 			return true
 		end
@@ -3742,6 +3904,7 @@ function TryBreakSoftResetForTarget()
 
 	AcquireAttackTarget()
 	if AttackTarget ~= 0 then
+		EngageFreshAttackTarget(0)
 		CancelSoftStandbyReset()
 		return true
 	end
@@ -3763,6 +3926,7 @@ function StartAttackChase(target)
 	NextChaseRepathAt = 0
 	NextAttackCommandAt = 0
 	NextAttackRefreshMoveAt = 0
+	AttackTargetCommittedUntil = GetTick() + ATTACK_TARGET_COMMIT_MS
 	CurrentState = STATE_CHASE_ATTACK
 end
 
@@ -3996,11 +4160,19 @@ function IssueOffensiveSkillOnTarget(skillTarget, skillLevel)
 
 	local spBefore = GetV(V_SP, MyID)
 	SkillObject(MyID, skillLevel, skillID, skillTarget)
-	LatchOneSkillAttempt(skillTarget)
-	ReserveSkillCast(skillTarget)
 	if IsFilir(MyID) then
-		NextCapriceTryAt = GetTick() + FILIR_OFFENSIVE_RETRY_MS
+		MarkSkillCast(skillTarget)
+		NextCapriceAt = GetTick() + GetOffensiveSkillDelayMs(skillLevel)
+		NextCapriceTryAt = NextCapriceAt
+		LastSkillTarget = skillTarget
+		if skillTarget == ManualCapriceTarget then
+			ClearManualCapriceTarget()
+		end
+		ClearPendingOffensiveSkillAttempt()
+		return skillTarget
 	else
+		LatchOneSkillAttempt(skillTarget)
+		ReserveSkillCast(skillTarget)
 		NextCapriceTryAt = GetTick() + CAPRICE_RETRY_MS
 	end
 	if PendingCapriceAt == 0 or PendingCapriceTarget ~= skillTarget then
@@ -4228,6 +4400,10 @@ function TryPreemptLowPriorityAttackTarget()
 		return false
 	end
 
+	if GetTick() < AttackTargetCommittedUntil then
+		return false
+	end
+
 	if CurrentState == STATE_ATTACK
 		or AttackTargetHit == 1
 		or IsInAttackMotion(MyID)
@@ -4253,16 +4429,8 @@ function TryPreemptLowPriorityAttackTarget()
 	if betterTier == currentTier then
 		local currentPriority = GetAttackBehaviorPriority(AttackTarget)
 		local betterPriority = GetAttackBehaviorPriority(betterTarget)
-		if betterPriority < currentPriority then
+		if betterPriority <= currentPriority then
 			return false
-		end
-
-		if betterPriority == currentPriority then
-			local currentDistance = DistanceToActor(MyID, AttackTarget)
-			local betterDistance = DistanceToActor(MyID, betterTarget)
-			if currentDistance ~= -1 and (betterDistance == -1 or betterDistance >= currentDistance) then
-				return false
-			end
 		end
 	end
 
@@ -4425,11 +4593,26 @@ function TryFilirAttackFallback()
 	return 1
 end
 
+function ShouldHoldFilirCloseEngage(target)
+	if IsFilir(MyID) == false
+		or target == 0
+		or target ~= AttackTarget
+		or TargetUsesSnipeBehavior(target) then
+		return false
+	end
+
+	local distance = DistanceToActor(MyID, target)
+	if distance == -1 or distance > StickyAttackRange() or distance <= AttackRange() then
+		return false
+	end
+
+	return GetTick() < NextAttackCommandAt
+end
+
 function ShouldFilirHoldForRepeatSkill(target)
 	if IsFilir(MyID) == false
 		or target == 0
 		or target ~= AttackTarget
-		or HasTacticRepeatSkillMode(target) == false
 		or IsValidAttackTargetForCurrentPurpose(target) == false
 		or IsIgnoredTarget(target)
 		or IsKSTarget(target)
@@ -4441,6 +4624,10 @@ function ShouldFilirHoldForRepeatSkill(target)
 
 	local skillID = GetOffensiveSkillID()
 	local skillLevel = GetTargetSkillLevel(target)
+	if HasStartedFilirMoonlightChain(target) == false then
+		return false
+	end
+
 	if skillID == 0
 		or HasEnoughSPForOffensiveSkill(skillLevel) == false
 		or OffensiveSkillInRange(target, skillID, skillLevel) == false then
@@ -4450,12 +4637,113 @@ function ShouldFilirHoldForRepeatSkill(target)
 	return GetSkillCastCount(target) < GetTargetSkillCount(target)
 end
 
+function HasStartedFilirMoonlightChain(target)
+	if IsFilir(MyID) == false or target == 0 or target ~= AttackTarget then
+		return false
+	end
+
+	return GetSkillCastCount(target) > 0
+end
+
+function ShouldFilirPrioritizeRepeatSkillTarget(target)
+	if IsFilir(MyID) == false
+		or target == 0
+		or target ~= AttackTarget
+		or IsValidAttackTargetForCurrentPurpose(target) == false
+		or IsIgnoredTarget(target)
+		or IsKSTarget(target)
+		or IsTargetInActiveRange(target) == false
+		or TargetUsesAvoidBehavior(target)
+		or TargetUsesSnipeBehavior(target) then
+		return false
+	end
+
+	if HasStartedFilirMoonlightChain(target) == false then
+		return false
+	end
+
+	if GetSkillCastCount(target) >= GetTargetSkillCount(target) then
+		return false
+	end
+
+	local skillLevel = GetTargetSkillLevel(target)
+	return HasEnoughSPForOffensiveSkill(skillLevel)
+end
+
+function TargetAllowsFilirImmediateRepeatSkill(id)
+	if id == 0 or IsFilir(MyID) == false then
+		return false
+	end
+
+	if TargetUsesKiteNoAttackBehavior(id) then
+		return false
+	end
+
+	if HasStartedFilirMoonlightChain(id) == false then
+		return false
+	end
+
+	return GetSkillCastCount(id) < GetTargetSkillCount(id)
+end
+
+function TryCastFilirRepeatSkillOnCurrentTarget()
+	if ShouldFilirPrioritizeRepeatSkillTarget(AttackTarget) == false then
+		return 0
+	end
+
+	if SkillReady() == false then
+		return 0
+	end
+
+	local skillID = GetOffensiveSkillID()
+	local skillLevel = GetTargetSkillLevel(AttackTarget)
+	if skillID == 0
+		or OffensiveSkillInRange(AttackTarget, skillID, skillLevel) == false
+		or TargetAllowsFilirImmediateRepeatSkill(AttackTarget) == false then
+		return 0
+	end
+
+	return IssueOffensiveSkillOnTarget(AttackTarget, skillLevel)
+end
+
+function HandleFilirRepeatSkillPriority(target)
+	if ShouldFilirPrioritizeRepeatSkillTarget(target) == false then
+		return 0
+	end
+
+	if TryCastFilirRepeatSkillOnCurrentTarget() ~= 0 then
+		ResetPathingProbe()
+		CurrentState = STATE_ATTACK
+		return 1
+	end
+
+	local skillID = GetOffensiveSkillID()
+	local skillLevel = GetTargetSkillLevel(target)
+	local distance = DistanceToActor(MyID, target)
+	if distance == -1 or skillID == 0 then
+		return 0
+	end
+
+	if OffensiveSkillInRange(target, skillID, skillLevel) then
+		CurrentState = STATE_ATTACK
+		return 1
+	end
+
+	ForceAttackChaseMovement()
+	CurrentState = STATE_CHASE_ATTACK
+	return 1
+end
+
 function TryImmediateFilirCombatHandoff()
 	if IsFilir(MyID) == false
 		or AttackTarget == 0
 		or IsValidAttackTargetForCurrentPurpose(AttackTarget) == false
 		or TargetUsesSnipeBehavior(AttackTarget) then
 		return 0
+	end
+
+	if HandleFilirRepeatSkillPriority(AttackTarget) == 1 then
+		return 1
 	end
 
 	if TryFilirAttackFallback() == 1 then
@@ -4469,9 +4757,114 @@ function TryImmediateFilirCombatHandoff()
 		return 1
 	end
 
+	if ShouldHoldFilirCloseEngage(AttackTarget) then
+		CurrentState = STATE_ATTACK
+		return 1
+	end
+
 	ForceAttackChaseMovement()
 	CurrentState = STATE_CHASE_ATTACK
 	return 1
+end
+
+function RedirectAttackAfterTargetSwap(previousTarget)
+	if AttackTarget == 0 or TargetUsesSnipeBehavior(AttackTarget) then
+		return 0
+	end
+
+	if TryFilirAttackFallback() == 1 then
+		return 1
+	end
+
+	if TryStickyAttackCommand() == 1 then
+		if AttackTarget ~= 0 then
+			if DistanceToActor(MyID, AttackTarget) <= AttackRange() then
+				CurrentState = STATE_ATTACK
+			else
+				CurrentState = STATE_CHASE_ATTACK
+			end
+		end
+		return 1
+	end
+
+	local nextX, nextY = GetAttackApproachCell(AttackTarget)
+	if nextX == -1 or nextY == -1 then
+		return 0
+	end
+
+	local shouldRedirect = false
+	if GetV(V_MOTION, MyID) == MOTION_MOVE then
+		shouldRedirect = true
+	end
+
+	if MoveX ~= nextX or MoveY ~= nextY then
+		shouldRedirect = true
+	end
+
+	if previousTarget ~= 0 then
+		local previousX, previousY = GetKnownActorPosition(previousTarget)
+		if previousX ~= -1 and previousY ~= -1 then
+			local oldMoveDistance = Distance(MoveX, MoveY, previousX, previousY)
+			local newMoveDistance = Distance(MoveX, MoveY, nextX, nextY)
+			if oldMoveDistance ~= -1 and oldMoveDistance <= 1 and (newMoveDistance == -1 or newMoveDistance > 1) then
+				shouldRedirect = true
+			end
+		end
+	end
+
+	if shouldRedirect == false then
+		return 0
+	end
+
+	ForceAttackChaseMovement()
+	CurrentState = STATE_CHASE_ATTACK
+	return 1
+end
+
+function EngageFreshAttackTarget(previousTarget)
+	if AttackTarget == 0 or IsValidAttackTargetForCurrentPurpose(AttackTarget) == false then
+		return false
+	end
+
+	if HandleFilirRepeatSkillPriority(AttackTarget) == 1 then
+		return true
+	end
+
+	if RedirectAttackAfterTargetSwap(previousTarget) == 1 then
+		return true
+	end
+
+	if TargetUsesSnipeBehavior(AttackTarget) then
+		return false
+	end
+
+	local distance = DistanceToActor(MyID, AttackTarget)
+	if distance ~= -1 then
+		if distance <= StickyAttackRange() and TryStickyAttackCommand() == 1 then
+			if distance <= AttackRange() then
+				CurrentState = STATE_ATTACK
+			else
+				CurrentState = STATE_CHASE_ATTACK
+			end
+			return true
+		end
+
+		if IsFilir(MyID) == false and distance <= AttackRange() then
+			ResetPathingProbe()
+			Attack(MyID, AttackTarget)
+			NextAttackCommandAt = GetTick() + ATTACK_REISSUE_MS
+			AttackTargetHit = 1
+			HandlePostNormalAttack(AttackTarget)
+			if AttackTarget ~= 0 then
+				CurrentState = STATE_ATTACK
+			end
+			return true
+		end
+	end
+
+	ForceAttackChaseMovement()
+	CurrentState = STATE_CHASE_ATTACK
+	return true
 end
 
 function ResumeFilirAttackAfterOffensiveSkill(castTarget)
@@ -5168,6 +5561,7 @@ function TickIdle()
 	if IsFilir(MyID) then
 		AcquireAttackTarget()
 		if AttackTarget ~= 0 then
+			EngageFreshAttackTarget(0)
 			return
 		end
 	end
@@ -5179,6 +5573,7 @@ function TickIdle()
 
 	AcquireAttackTarget()
 	if AttackTarget ~= 0 then
+		EngageFreshAttackTarget(0)
 		return
 	end
 
@@ -5212,6 +5607,7 @@ function TickFollow()
 	if IsFilir(MyID) then
 		AcquireAttackTarget()
 		if AttackTarget ~= 0 then
+			EngageFreshAttackTarget(0)
 			return
 		end
 	end
@@ -5223,6 +5619,7 @@ function TickFollow()
 
 	AcquireAttackTarget()
 	if AttackTarget ~= 0 then
+		EngageFreshAttackTarget(0)
 		return
 	end
 
@@ -5267,10 +5664,17 @@ function TickChaseAttack()
 		or (protectionTarget == false and IsKSTarget(AttackTarget))
 		or IsTargetInActiveRange(AttackTarget) == false
 		or IsTargetReachableWhileTurretStaying(AttackTarget) == false then
+		local oldAttackTarget = AttackTarget
+		local shouldIgnoreOldAttackTarget = ShouldIgnoreDroppedTargetAfterSwap(oldAttackTarget)
 		ClearAttackTarget()
-		AcquireAttackTarget()
+		if shouldIgnoreOldAttackTarget then
+			IgnoreTargetBriefly(oldAttackTarget)
+		end
+		AcquireAttackTarget(oldAttackTarget)
 		if AttackTarget == 0 then
 			CurrentState = STATE_IDLE
+		elseif RedirectAttackAfterTargetSwap(oldAttackTarget) == 1 then
+			return
 		elseif TryImmediateFilirCombatHandoff() == 1 then
 			return
 		end
@@ -5309,6 +5713,10 @@ function TickChaseAttack()
 		end
 	end
 
+	if HandleFilirRepeatSkillPriority(AttackTarget) == 1 then
+		return
+	end
+
 	if ShouldFilirHoldForRepeatSkill(AttackTarget) then
 		return
 	end
@@ -5331,6 +5739,11 @@ function TickChaseAttack()
 	end
 
 	if distance <= StickyAttackRange() and TryStickyAttackCommand() == 1 then
+		CurrentState = STATE_ATTACK
+		return
+	end
+
+	if ShouldHoldFilirCloseEngage(AttackTarget) then
 		CurrentState = STATE_ATTACK
 		return
 	end
@@ -5401,10 +5814,17 @@ function TickAttack()
 		or (protectionTarget == false and IsKSTarget(AttackTarget))
 		or IsTargetInActiveRange(AttackTarget) == false
 		or IsTargetReachableWhileTurretStaying(AttackTarget) == false then
+		local oldAttackTarget = AttackTarget
+		local shouldIgnoreOldAttackTarget = ShouldIgnoreDroppedTargetAfterSwap(oldAttackTarget)
 		ClearAttackTarget()
-		AcquireAttackTarget()
+		if shouldIgnoreOldAttackTarget then
+			IgnoreTargetBriefly(oldAttackTarget)
+		end
+		AcquireAttackTarget(oldAttackTarget)
 		if AttackTarget == 0 then
 			CurrentState = STATE_IDLE
+		elseif RedirectAttackAfterTargetSwap(oldAttackTarget) == 1 then
+			return
 		elseif TryImmediateFilirCombatHandoff() == 1 then
 			return
 		end
@@ -5443,6 +5863,10 @@ function TickAttack()
 		end
 	end
 
+	if HandleFilirRepeatSkillPriority(AttackTarget) == 1 then
+		return
+	end
+
 	if ShouldFilirHoldForRepeatSkill(AttackTarget) then
 		return
 	end
@@ -5454,6 +5878,11 @@ function TickAttack()
 	local distance = DistanceToActor(MyID, AttackTarget)
 	if distance > AttackRange() then
 		if distance <= StickyAttackRange() and TryStickyAttackCommand() == 1 then
+			return
+		end
+
+		if ShouldHoldFilirCloseEngage(AttackTarget) then
+			CurrentState = STATE_ATTACK
 			return
 		end
 
@@ -5796,6 +6225,7 @@ function EnsureActiveBehavior()
 
 	AcquireAttackTarget()
 	if AttackTarget ~= 0 then
+		EngageFreshAttackTarget(0)
 		StandStillSince = 0
 		return
 	end
@@ -5818,6 +6248,10 @@ function ForceImmediateActivity()
 
 	if AttackTarget ~= 0 and IsValidAttackTargetForCurrentPurpose(AttackTarget) then
 		if CurrentState == STATE_ATTACK or CurrentState == STATE_CHASE_ATTACK then
+			if HandleFilirRepeatSkillPriority(AttackTarget) == 1 then
+				return
+			end
+
 			if TryUnstackFromTarget(AttackTarget) == 1 then
 				return
 			end
@@ -5869,6 +6303,10 @@ function ForceImmediateActivity()
 				CurrentState = STATE_CHASE_ATTACK
 				return
 			end
+		end
+
+		if HandleFilirRepeatSkillPriority(AttackTarget) == 1 then
+			return
 		end
 
 		local distance = DistanceToActor(MyID, AttackTarget)

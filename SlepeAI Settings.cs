@@ -28,7 +28,7 @@ namespace MobListEditor
     internal sealed class HomunculusSkillState { public int MinSPPercent; public int Level; public int OwnerHPPercent; public int HomunHPPercent; }
     internal sealed class SkillEditorRow { public NumericUpDown MinSPPercent; public ComboBox Level; }
     internal sealed class PatrolSettings { public bool Enabled; public string Shape; public int Distance; }
-    internal sealed class RuntimeSettings { public bool DefendOwner; public bool TurretStayOnCell; public bool? NoKS; public bool AntiStuckEnabled; public int AntiStuckMs; public bool FollowOwnerOnMove; public int FollowOwnerDelayMs; public int SoftResetMs; public int OwnerResumeMs; public int PostSkillWaitMs; public bool DanceAttackEnabled; public bool DanceMovingOnly; public bool DanceEveryAttack; public int DanceMoveMs; }
+    internal sealed class RuntimeSettings { public bool DefendOwner; public bool TurretStayOnCell; public bool? NoKS; public string KSMode; public bool AntiStuckEnabled; public int AntiStuckMs; public bool FollowOwnerOnMove; public int FollowOwnerDelayMs; public int SoftResetMs; public int OwnerResumeMs; public int PostSkillWaitMs; public bool DanceAttackEnabled; public bool DanceMovingOnly; public bool DanceEveryAttack; public int DanceMoveMs; }
     internal sealed class EditorProfileSnapshot { public string Id; public string Name; public string BehaviorMode; public string TacticsMode; public List<TacticEntry> Whitelist; public List<TacticEntry> Blacklist; public Dictionary<string, HomunculusSkillState> HomunculusSkills; public PatrolSettings Patrol; public RuntimeSettings Runtime; }
     internal sealed class EditorProfileMeta { public string Id; public string Name; }
     internal sealed class EditorProfileStore { public string ActiveProfileId; public string AltTAction; public string AltTProfileId; public List<EditorProfileMeta> Profiles; }
@@ -59,6 +59,7 @@ namespace MobListEditor
         private static readonly string[] BehaviorOptions = { "Slepe Mode", "Snipe", "Avoid", "React", "Attack" };
         private static readonly string[] TacticBehaviorOptions = { "", "Slepe Mode", "Snipe", "Avoid", "Kite Attack", "Kite No Attack", "Attack", "React" };
         private static readonly string[] TacticPriorityOptions = { "", "First", "Normal", "Last" };
+        private static readonly string[] KsModeOptions = { "No KS", "First Attack", "Full KS" };
         private static readonly string[] SkillLevelOptions = { "", "1", "2", "3", "4", "5" };
         private static readonly string[] HomunculusSkillLevelOptions = { "OFF", "Lv1", "Lv2", "Lv3", "Lv4", "Lv5" };
         private static readonly string[] HomunculusFamilies = { "Amistr", "Filir", "Lif", "Vanilmirth" };
@@ -115,7 +116,7 @@ namespace MobListEditor
         private ComboBox _altTProfileComboBox;
         private CheckBox _defendOwnerCheckBox;
         private CheckBox _turretStayOnCellCheckBox;
-        private CheckBox _noKsCheckBox;
+        private ComboBox _ksModeComboBox;
         private CheckBox _antiStuckEnabledCheckBox;
         private NumericUpDown _antiStuckMsNumeric;
         private CheckBox _followOwnerOnMoveCheckBox;
@@ -313,15 +314,18 @@ namespace MobListEditor
 
         private void BuildBehaviorTab(TabPage tab)
         {
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(12) };
+            var scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+            tab.Controls.Add(scrollPanel);
+
+            var layout = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 1, RowCount = 7, Padding = new Padding(12), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            tab.Controls.Add(layout);
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            scrollPanel.Controls.Add(layout);
             layout.Controls.Add(BuildProfilesGroup(), 0, 0);
             var row = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
             row.Controls.Add(new Label { Text = "Overall Behavior", AutoSize = true, Margin = new Padding(0, 6, 8, 0) });
@@ -430,8 +434,9 @@ namespace MobListEditor
 
         private Control BuildBehaviorFeaturesGroup()
         {
-            var group = new GroupBox { Text = "Live AI Features", Dock = DockStyle.Fill, Padding = new Padding(10), Margin = new Padding(0, 4, 0, 0) };
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
+            var group = new GroupBox { Text = "Live AI Features", Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = new Padding(0, 4, 0, 0) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             group.Controls.Add(layout);
@@ -440,7 +445,7 @@ namespace MobListEditor
             AddFeatureRow(layout, 1, "Turret Mode", "MOVE command anchors the homunculus to the clicked spot and makes it fight around that area instead of following normally.");
             _turretStayOnCellCheckBox = AddInteractiveFeatureRow(layout, 2, "Stay On Cell", false, "When turret mode is active, the homunculus stays on the anchored cell and only attacks or casts when the target is already in range.");
             _turretStayOnCellCheckBox.Margin = new Padding(24, 2, 6, 10);
-            _noKsCheckBox = AddInteractiveFeatureRow(layout, 3, "No KS", true, "If enabled, the homunculus avoids mobs already being handled by other players or homunculi, and also avoids mobs already chasing someone else.");
+            _ksModeComboBox = AddComboFeatureRow(layout, 3, "KS Mode", KsModeOptions, "No KS", "Choose how strictly the homunculus avoids kill stealing. No KS never touches other players' mobs, First Attack keeps going only if your homunculus landed the first auto-attack, and Full KS ignores KS protection entirely.");
             return group;
         }
 
@@ -463,6 +468,21 @@ namespace MobListEditor
             layout.Controls.Add(box, 0, rowIndex);
             layout.Controls.Add(help, 1, rowIndex);
             return box;
+        }
+
+        private ComboBox AddComboFeatureRow(TableLayoutPanel layout, int rowIndex, string title, string[] options, string selectedOption, string description)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var label = new Label { Text = title, AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
+            var comboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140, Margin = new Padding(0, 2, 6, 10) };
+            comboBox.Items.AddRange(options);
+            comboBox.SelectedItem = selectedOption;
+            var help = CreateHelpLabel(description);
+            help.Margin = new Padding(0, 2, 0, 10);
+            layout.Controls.Add(label, 0, rowIndex);
+            layout.Controls.Add(comboBox, 1, rowIndex);
+            layout.Controls.Add(help, 2, rowIndex);
+            return comboBox;
         }
 
         private Label CreateHelpLabel(string description)
@@ -1420,7 +1440,7 @@ namespace MobListEditor
 
         private static RuntimeSettings GetDefaultRuntimeSettings()
         {
-            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, NoKS = true, AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 700, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
+            return new RuntimeSettings { DefendOwner = true, TurretStayOnCell = false, NoKS = true, KSMode = "No KS", AntiStuckEnabled = true, AntiStuckMs = 500, FollowOwnerOnMove = true, FollowOwnerDelayMs = 0, SoftResetMs = 400, OwnerResumeMs = 100, PostSkillWaitMs = 700, DanceAttackEnabled = false, DanceMovingOnly = true, DanceEveryAttack = false, DanceMoveMs = 600 };
         }
 
         private static RuntimeSettings ParseRuntimeSettings(string text)
@@ -1431,6 +1451,8 @@ namespace MobListEditor
             result.DefendOwner = !Regex.IsMatch(body, "DefendOwner\\s*=\\s*false", RegexOptions.IgnoreCase);
             result.TurretStayOnCell = Regex.IsMatch(body, "TurretStayOnCell\\s*=\\s*true", RegexOptions.IgnoreCase);
             result.NoKS = !Regex.IsMatch(body, "NoKS\\s*=\\s*false", RegexOptions.IgnoreCase);
+            var ksModeMatch = Regex.Match(body, "KSMode\\s*=\\s*[\"'](?<value>[^\"']+)[\"']", RegexOptions.IgnoreCase);
+            result.KSMode = NormalizeKSMode(ksModeMatch.Success ? ksModeMatch.Groups["value"].Value : (result.NoKS != false ? "No KS" : "Full KS"));
             result.AntiStuckEnabled = !Regex.IsMatch(body, "AntiStuckEnabled\\s*=\\s*false", RegexOptions.IgnoreCase);
             result.AntiStuckMs = ClampRuntimeMs(ParseIntField(body, "AntiStuckMs", result.AntiStuckMs));
             result.FollowOwnerOnMove = !Regex.IsMatch(body, "FollowOwnerOnMove\\s*=\\s*false", RegexOptions.IgnoreCase);
@@ -1619,7 +1641,7 @@ namespace MobListEditor
             var runtime = settings ?? GetDefaultRuntimeSettings();
             _defendOwnerCheckBox.Checked = runtime.DefendOwner;
             _turretStayOnCellCheckBox.Checked = runtime.TurretStayOnCell;
-            _noKsCheckBox.Checked = runtime.NoKS != false;
+            _ksModeComboBox.SelectedItem = NormalizeKSMode(string.IsNullOrWhiteSpace(runtime.KSMode) ? (runtime.NoKS != false ? "No KS" : "Full KS") : runtime.KSMode);
             _antiStuckEnabledCheckBox.Checked = runtime.AntiStuckEnabled;
             _antiStuckMsNumeric.Value = ClampRuntimeMs(runtime.AntiStuckMs);
             _antiStuckMsNumeric.Enabled = _antiStuckEnabledCheckBox.Checked;
@@ -1670,7 +1692,8 @@ namespace MobListEditor
             {
                 DefendOwner = _defendOwnerCheckBox.Checked,
                 TurretStayOnCell = _turretStayOnCellCheckBox.Checked,
-                NoKS = _noKsCheckBox.Checked,
+                KSMode = NormalizeKSMode(Convert.ToString(_ksModeComboBox.SelectedItem)),
+                NoKS = NormalizeKSMode(Convert.ToString(_ksModeComboBox.SelectedItem)) == "No KS",
                 AntiStuckEnabled = _antiStuckEnabledCheckBox.Checked,
                 AntiStuckMs = ClampRuntimeMs((int)_antiStuckMsNumeric.Value),
                 FollowOwnerOnMove = _followOwnerOnMoveCheckBox.Checked,
@@ -1756,6 +1779,7 @@ namespace MobListEditor
         private string GetSelectedTacticsMode() { return NormalizeTacticsMode(Convert.ToString(_modeComboBox.SelectedItem)); }
         private static string NormalizeBehaviorMode(string value) { foreach (var option in BehaviorOptions) if (string.Equals(option, value, StringComparison.OrdinalIgnoreCase)) return option; return "Slepe Mode"; }
         private static string NormalizeTacticsMode(string value) { if (string.Equals(value, "Whitelist", StringComparison.OrdinalIgnoreCase)) return "Whitelist"; if (string.Equals(value, "Blacklist", StringComparison.OrdinalIgnoreCase)) return "Blacklist"; return "Off"; }
+        private static string NormalizeKSMode(string value) { foreach (var option in KsModeOptions) if (string.Equals(option, value, StringComparison.OrdinalIgnoreCase)) return option; return "No KS"; }
         private static string NormalizePatrolShape(string value)
         {
             var text = (value ?? string.Empty).Trim();
@@ -1864,7 +1888,7 @@ namespace MobListEditor
         private static string BuildSkillStateKey(string family, string skillKey) { return family + "." + skillKey; }
         private static List<TacticEntry> CloneEntries(List<TacticEntry> entries) { return (entries ?? new List<TacticEntry>()).Select(entry => NormalizeTacticEntry(entry)).ToList(); }
         private static Dictionary<string, HomunculusSkillState> CloneSkillSettings(Dictionary<string, HomunculusSkillState> settings) { var result = new Dictionary<string, HomunculusSkillState>(StringComparer.OrdinalIgnoreCase); if (settings == null) return result; foreach (var pair in settings) result[pair.Key] = new HomunculusSkillState { MinSPPercent = pair.Value.MinSPPercent, Level = pair.Value.Level, OwnerHPPercent = pair.Value.OwnerHPPercent, HomunHPPercent = pair.Value.HomunHPPercent }; return result; }
-        private static RuntimeSettings CloneRuntimeSettings(RuntimeSettings settings) { var value = settings ?? GetDefaultRuntimeSettings(); return new RuntimeSettings { DefendOwner = value.DefendOwner, TurretStayOnCell = value.TurretStayOnCell, NoKS = value.NoKS == false ? (bool?)false : true, AntiStuckEnabled = value.AntiStuckEnabled, AntiStuckMs = ClampRuntimeMs(value.AntiStuckMs), FollowOwnerOnMove = value.FollowOwnerOnMove, FollowOwnerDelayMs = ClampRuntimeMs(value.FollowOwnerDelayMs), SoftResetMs = ClampRuntimeMs(value.SoftResetMs), OwnerResumeMs = ClampRuntimeMs(value.OwnerResumeMs), PostSkillWaitMs = ClampRuntimeMs(value.PostSkillWaitMs), DanceAttackEnabled = value.DanceAttackEnabled, DanceMovingOnly = value.DanceMovingOnly, DanceEveryAttack = value.DanceEveryAttack, DanceMoveMs = ClampRuntimeMs(value.DanceMoveMs) }; }
+        private static RuntimeSettings CloneRuntimeSettings(RuntimeSettings settings) { var value = settings ?? GetDefaultRuntimeSettings(); var ksMode = NormalizeKSMode(string.IsNullOrWhiteSpace(value.KSMode) ? (value.NoKS == false ? "Full KS" : "No KS") : value.KSMode); return new RuntimeSettings { DefendOwner = value.DefendOwner, TurretStayOnCell = value.TurretStayOnCell, NoKS = ksMode == "No KS", KSMode = ksMode, AntiStuckEnabled = value.AntiStuckEnabled, AntiStuckMs = ClampRuntimeMs(value.AntiStuckMs), FollowOwnerOnMove = value.FollowOwnerOnMove, FollowOwnerDelayMs = ClampRuntimeMs(value.FollowOwnerDelayMs), SoftResetMs = ClampRuntimeMs(value.SoftResetMs), OwnerResumeMs = ClampRuntimeMs(value.OwnerResumeMs), PostSkillWaitMs = ClampRuntimeMs(value.PostSkillWaitMs), DanceAttackEnabled = value.DanceAttackEnabled, DanceMovingOnly = value.DanceMovingOnly, DanceEveryAttack = value.DanceEveryAttack, DanceMoveMs = ClampRuntimeMs(value.DanceMoveMs) }; }
         private static string PromptForText(IWin32Window owner, string title, string prompt, string initialValue)
         {
             using (var form = new Form())
@@ -1901,7 +1925,7 @@ namespace MobListEditor
             builder.AppendLine();
             builder.AppendLine("TargetLists.Patrol = { Enabled = " + ((patrolSettings != null && patrolSettings.Enabled) ? "true" : "false") + ", Shape = \"" + EscapeLua(NormalizePatrolShape(patrolSettings != null ? patrolSettings.Shape : "Square CW")) + "\", Distance = " + ClampPatrolDistance(patrolSettings != null ? patrolSettings.Distance : 4) + " }");
             runtimeSettings = CloneRuntimeSettings(runtimeSettings);
-            builder.AppendLine("TargetLists.Runtime = { DefendOwner = " + (runtimeSettings.DefendOwner ? "true" : "false") + ", TurretStayOnCell = " + (runtimeSettings.TurretStayOnCell ? "true" : "false") + ", NoKS = " + (runtimeSettings.NoKS != false ? "true" : "false") + ", AntiStuckEnabled = " + (runtimeSettings.AntiStuckEnabled ? "true" : "false") + ", AntiStuckMs = " + runtimeSettings.AntiStuckMs + ", FollowOwnerOnMove = " + (runtimeSettings.FollowOwnerOnMove ? "true" : "false") + ", FollowOwnerDelayMs = " + runtimeSettings.FollowOwnerDelayMs + ", SoftResetMs = " + runtimeSettings.SoftResetMs + ", OwnerResumeMs = " + runtimeSettings.OwnerResumeMs + ", PostSkillWaitMs = " + runtimeSettings.PostSkillWaitMs + ", DanceAttackEnabled = " + (runtimeSettings.DanceAttackEnabled ? "true" : "false") + ", DanceMovingOnly = " + (runtimeSettings.DanceMovingOnly ? "true" : "false") + ", DanceEveryAttack = " + (runtimeSettings.DanceEveryAttack ? "true" : "false") + ", DanceMoveMs = " + runtimeSettings.DanceMoveMs + " }");
+            builder.AppendLine("TargetLists.Runtime = { DefendOwner = " + (runtimeSettings.DefendOwner ? "true" : "false") + ", TurretStayOnCell = " + (runtimeSettings.TurretStayOnCell ? "true" : "false") + ", KSMode = \"" + EscapeLua(NormalizeKSMode(runtimeSettings.KSMode)) + "\", NoKS = " + (NormalizeKSMode(runtimeSettings.KSMode) == "No KS" ? "true" : "false") + ", AntiStuckEnabled = " + (runtimeSettings.AntiStuckEnabled ? "true" : "false") + ", AntiStuckMs = " + runtimeSettings.AntiStuckMs + ", FollowOwnerOnMove = " + (runtimeSettings.FollowOwnerOnMove ? "true" : "false") + ", FollowOwnerDelayMs = " + runtimeSettings.FollowOwnerDelayMs + ", SoftResetMs = " + runtimeSettings.SoftResetMs + ", OwnerResumeMs = " + runtimeSettings.OwnerResumeMs + ", PostSkillWaitMs = " + runtimeSettings.PostSkillWaitMs + ", DanceAttackEnabled = " + (runtimeSettings.DanceAttackEnabled ? "true" : "false") + ", DanceMovingOnly = " + (runtimeSettings.DanceMovingOnly ? "true" : "false") + ", DanceEveryAttack = " + (runtimeSettings.DanceEveryAttack ? "true" : "false") + ", DanceMoveMs = " + runtimeSettings.DanceMoveMs + " }");
             builder.AppendLine();
             builder.AppendLine("TargetLists.HomunculusSkills = {");
             AppendHomunculusSkills(builder, homunculusSkillSettings);
