@@ -1956,8 +1956,16 @@ function GetOffensiveSkillSPCost(level)
 	return 0
 end
 
+function HasVanilBragiBuff()
+	return IsVanilmirth(MyID) and VanilBragiBuffUntil > GetTick()
+end
+
 function GetOffensiveSkillDelayMs(level)
 	if IsVanilmirth(MyID) then
+		if HasVanilBragiBuff() then
+			return 0
+		end
+
 		return 1800 + (level * 200)
 	elseif IsFilir(MyID) then
 		return 200
