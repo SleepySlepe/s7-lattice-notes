@@ -346,6 +346,7 @@ STUCK_STAND_MS = TargetLists.Runtime.AntiStuckMs
 CHASE_LEAD_CELLS = 1
 FILIR_CHASE_LEAD_CELLS = 1
 FILIR_CHASE_REPATH_MS = 250
+ATTACK_APPROACH_STICKY_MS = 450
 SP_TICK_INTERVAL_MS = 10000
 SP_TICK_PAUSE_WINDOW_MS = 500
 ANCHOR_RANGE = 7
@@ -407,6 +408,12 @@ ManualCapriceSetAt = 0
 ManualCapriceLevel = 0
 ManualCapriceSkill = 0
 NextChaseRepathAt = 0
+StickyApproachTarget = 0
+StickyApproachX = -1
+StickyApproachY = -1
+StickyApproachTargetX = -1
+StickyApproachTargetY = -1
+StickyApproachUntil = 0
 NextAttackCommandAt = 0
 NextAttackRefreshMoveAt = 0
 AttackTargetCommittedUntil = 0
@@ -450,6 +457,7 @@ IgnoreTargetUntil = {}
 PathProbeTarget = 0
 PathProbeStartedAt = 0
 PathProbeBestDistance = 999
+PathProbeStrikeCount = 0
 PathProbeTargetX = -1
 PathProbeTargetY = -1
 SightRecoveryStep = 1
@@ -837,6 +845,63 @@ function ClearAttackTarget()
 	if oldAttackTarget ~= 0 then
 		ResetPathingProbe()
 	end
+	ClearStickyAttackApproach()
+end
+
+function ClearStickyAttackApproach()
+	StickyApproachTarget = 0
+	StickyApproachX = -1
+	StickyApproachY = -1
+	StickyApproachTargetX = -1
+	StickyApproachTargetY = -1
+	StickyApproachUntil = 0
+end
+
+function CacheStickyAttackApproach(target, approachX, approachY)
+	local targetX, targetY = GetV(V_POSITION, target)
+	StickyApproachTarget = target
+	StickyApproachX = approachX
+	StickyApproachY = approachY
+	StickyApproachTargetX = targetX
+	StickyApproachTargetY = targetY
+	StickyApproachUntil = GetTick() + ATTACK_APPROACH_STICKY_MS
+end
+
+function CanReuseStickyAttackApproach(target, rawX, rawY)
+	if StickyApproachTarget ~= target
+		or StickyApproachX == -1
+		or StickyApproachY == -1
+		or GetTick() >= StickyApproachUntil then
+		return false
+	end
+
+	local targetX, targetY = GetV(V_POSITION, target)
+	if targetX == -1 or targetY == -1 then
+		return false
+	end
+
+	if Distance(targetX, targetY, StickyApproachTargetX, StickyApproachTargetY) > 1 then
+		return false
+	end
+
+	if IsOwnerCell(StickyApproachX, StickyApproachY)
+		or IsCellOccupiedByOther(StickyApproachX, StickyApproachY, target) then
+		return false
+	end
+
+	if Distance(StickyApproachX, StickyApproachY, targetX, targetY) > AttackRange() + 1 then
+		return false
+	end
+
+	if rawX ~= -1 and rawY ~= -1 and Distance(StickyApproachX, StickyApproachY, rawX, rawY) <= 1 then
+		return true
+	end
+
+	if GetV(V_MOTION, MyID) == MOTION_MOVE and MoveX == StickyApproachX and MoveY == StickyApproachY then
+		return true
+	end
+
+	return false
 end
 
 function WasAttacked(id)
@@ -920,6 +985,7 @@ function ResetPathingProbe()
 	PathProbeTarget = 0
 	PathProbeStartedAt = 0
 	PathProbeBestDistance = 999
+	PathProbeStrikeCount = 0
 	PathProbeTargetX = -1
 	PathProbeTargetY = -1
 end
@@ -935,6 +1001,7 @@ function StartPathingProbe(target)
 	PathProbeTarget = target
 	PathProbeStartedAt = GetTick()
 	PathProbeBestDistance = distance ~= -1 and distance or 999
+	PathProbeStrikeCount = 0
 	PathProbeTargetX = targetX
 	PathProbeTargetY = targetY
 end
@@ -942,9 +1009,23 @@ end
 function MarkPathingProgress(target, distance)
 	PathProbeBestDistance = distance
 	PathProbeStartedAt = GetTick()
+	PathProbeStrikeCount = 0
 	local targetX, targetY = GetV(V_POSITION, target)
 	PathProbeTargetX = targetX
 	PathProbeTargetY = targetY
+end
+
+function RegisterPathingProbeStrike(target, distance)
+	PathProbeStrikeCount = PathProbeStrikeCount + 1
+	PathProbeStartedAt = GetTick()
+	PathProbeBestDistance = distance ~= -1 and distance or PathProbeBestDistance
+
+	local targetX, targetY = GetV(V_POSITION, target)
+	PathProbeTargetX = targetX
+	PathProbeTargetY = targetY
+	NextChaseRepathAt = 0
+
+	return PathProbeStrikeCount >= 2
 end
 
 function CheckTargetPathingFailure(target)
@@ -983,6 +1064,10 @@ function CheckTargetPathingFailure(target)
 	end
 
 	if GetTick() - PathProbeStartedAt < GetTargetPathingFailureTimeoutMs(target, distance) then
+		return false
+	end
+
+	if RegisterPathingProbeStrike(target, distance) == false then
 		return false
 	end
 
@@ -3919,6 +4004,10 @@ function StartAttackChase(target)
 		return
 	end
 
+	if AttackTarget ~= target then
+		ClearStickyAttackApproach()
+	end
+
 	CancelPostSkillWait()
 	AttackTarget = target
 	AttackTargetHit = 0
@@ -3943,6 +4032,7 @@ function FindMonsterTarget(excludedTarget)
 			and IsValidTarget(actor)
 			and IsIgnoredTarget(actor) == false
 			and IsKSTarget(actor) == false
+			and IsOutOfSight(MyID, actor) == false
 			and IsTargetInActiveRange(actor)
 			and IsTargetReachableWhileTurretStaying(actor) then
 			local priority = GetAttackBehaviorPriority(actor)
@@ -4429,8 +4519,20 @@ function TryPreemptLowPriorityAttackTarget()
 	if betterTier == currentTier then
 		local currentPriority = GetAttackBehaviorPriority(AttackTarget)
 		local betterPriority = GetAttackBehaviorPriority(betterTarget)
-		if betterPriority <= currentPriority then
+		if betterPriority < currentPriority then
 			return false
+		end
+
+		if betterPriority == currentPriority then
+			local currentDistance = DistanceToActor(MyID, AttackTarget)
+			local betterDistance = DistanceToActor(MyID, betterTarget)
+			if betterDistance == -1 then
+				return false
+			end
+
+			if currentDistance ~= -1 and betterDistance >= currentDistance then
+				return false
+			end
 		end
 	end
 
@@ -5117,7 +5219,7 @@ function ResolveAttackCell(target, desiredX, desiredY)
 	return myX, myY
 end
 
-function GetAttackApproachCell(target)
+function GetAttackApproachCellRaw(target)
 	local myX, myY = GetV(V_POSITION, MyID)
 	local targetX, targetY = GetV(V_POSITION, target)
 	if myX == -1 or targetX == -1 then
@@ -5125,7 +5227,7 @@ function GetAttackApproachCell(target)
 	end
 
 	if IsFilir(MyID) then
-		return GetFilirAttackApproachCell(target)
+		return GetFilirAttackApproachCellRaw(target)
 	end
 
 	if IsTargetActuallyMoving(target) then
@@ -5153,7 +5255,22 @@ function GetAttackApproachCell(target)
 	return ResolveAttackCell(target, targetX - (stepX * attackRange), targetY - (stepY * attackRange))
 end
 
-function GetFilirAttackApproachCell(target)
+function GetAttackApproachCell(target)
+	local nextX, nextY = GetAttackApproachCellRaw(target)
+	if nextX == -1 or nextY == -1 then
+		ClearStickyAttackApproach()
+		return nextX, nextY
+	end
+
+	if CanReuseStickyAttackApproach(target, nextX, nextY) then
+		return StickyApproachX, StickyApproachY
+	end
+
+	CacheStickyAttackApproach(target, nextX, nextY)
+	return nextX, nextY
+end
+
+function GetFilirAttackApproachCellRaw(target)
 	local myX, myY = GetV(V_POSITION, MyID)
 	local targetX, targetY = GetV(V_POSITION, target)
 	if myX == -1 or targetX == -1 then
