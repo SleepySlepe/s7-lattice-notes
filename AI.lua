@@ -1107,10 +1107,11 @@ function GetMonsterTactic(id)
 	local tactic = nil
 
 	if mode == "blacklist" then
-		tactic = TargetLists.BlacklistTactics[class]
-		if tactic ~= nil then
-			return tactic
-		end
+		return TargetLists.BlacklistTactics[class]
+	end
+
+	if mode == "whitelist" then
+		return TargetLists.WhitelistTactics[class]
 	end
 
 	tactic = TargetLists.WhitelistTactics[class]
@@ -2223,6 +2224,30 @@ function TargetHasPendingSkillAttempt(id)
 	return GetReservedSkillCastCount(id) > 0
 end
 
+function CanBypassPendingSkillAttemptLock(id, allowSlepeAfterAttack)
+	if id == 0 then
+		return false
+	end
+
+	if IsVanilmirth(MyID) == false or HasVanilBragiBuff() == false then
+		return false
+	end
+
+	if id ~= AttackTarget then
+		return false
+	end
+
+	if UsesSlepeCurrentTargetSkillRule(id) then
+		return false
+	end
+
+	if allowSlepeAfterAttack ~= true then
+		return false
+	end
+
+	return GetTargetSkillCount(id) >= 2
+end
+
 function TargetAllowsSkill(id, allowSlepeAfterAttack)
 	if TargetUsesKiteNoAttackBehavior(id) then
 		return false
@@ -2233,7 +2258,8 @@ function TargetAllowsSkill(id, allowSlepeAfterAttack)
 		return false
 	end
 
-	if TargetHasPendingSkillAttempt(id) then
+	if TargetHasPendingSkillAttempt(id)
+		and CanBypassPendingSkillAttemptLock(id, allowSlepeAfterAttack) == false then
 		return false
 	end
 
